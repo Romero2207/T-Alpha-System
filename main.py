@@ -1,22 +1,37 @@
-import os
-import subprocess
-import sys
+import streamlit as st
 
+# Конфигурация интерфейса
+st.set_page_config(
+    page_title="T-ALPHA | HYBRID TERMINAL",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-def launch_system():
-    print("--- T-ALPHA | INITIALIZING SYSTEM ---")
+# Описание структуры страниц
+pages = {
+    "Рынки": [
+        st.Page("ui/crypto_hub.py", title="⚡ Крипто-центр", icon="💎"),
+        st.Page("ui/stocks_hub.py", title="📈 Фондовый отдел", icon="🏢"),
+    ],
+    "Интеллект": [
+        st.Page("ui/ai_training.py", title="🧠 Обучение и Память", icon="🧬"),
+        st.Page("ui/strategy_lab.py", title="🔬 Лаборатория стратегий", icon="🧪"),
+    ],
+    "Настройки": [
+        st.Page("ui/api_config.py", title="🔑 API Ключи и Шлюзы", icon="🛡️"),
+    ]
+}
 
-    # Путь к дашборду
-    dashboard_path = os.path.join("ui", "dashboard.py")
+# Запуск навигации
+pg = st.navigation(pages)
 
-    # Команда для запуска streamlit из-под текущего окружения python
-    cmd = [sys.executable, "-m", "streamlit", "run", dashboard_path]
+# Общий стиль (Dark Finance Mode)
+st.markdown("""
+    <style>
+    .stApp { background-color: #010409; color: #e6edf3; }
+    [data-testid="stSidebar"] { background-color: #0d1117; border-right: 1px solid #30363d; }
+    </style>
+""", unsafe_allow_html=True)
 
-    try:
-        subprocess.run(cmd, check=True)
-    except KeyboardInterrupt:
-        print("\n--- SYSTEM TERMINATED BY USER ---")
-
-
-if __name__ == "__main__":
-    launch_system()
+pg.run()
