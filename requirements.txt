@@ -1,9 +1,4 @@
-pybit
-gigachat
-pandas
-python-dotenv
-feedparser
 streamlit
-plotly
-requests
-streamlit-lightweight-charts
+pybit
+pandas
+sqlite3

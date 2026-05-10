@@ -1,23 +1,47 @@
-# Примерная логика фонового процесса
 import time
-from core.memory import AlphaMemory
-# Тут будут импорты pybit и tinkoff-invest
+import sys
+import os
+from pybit.unified_trading import HTTP
 
-memory = AlphaMemory()
+# Добавляем корневую директорию в PYTHONPATH для корректных импортов
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.memory import get_connection, init_db
 
-def start_collection():
-    print("--- СБОР ДАННЫХ ЗАПУЩЕН (24/7) ---")
-    while True:
+class DataCollector:
+    def __init__(self, symbol="BTCUSDT", interval=5):
+        self.symbol = symbol
+        self.interval = interval # Интервал сбора данных в секундах
+        # Инициализируем клиент Bybit Testnet
+        self.client = HTTP(testnet=True)
+        init_db() # Убеждаемся, что БД существует
+
+    def fetch_and_store(self):
         try:
-            # 1. Сходить в Bybit
-            # 2. Сходить в Т-Банк
-            # 3. Сохранить в базу
-            # memory.save_market_tick("BTCUSDT", current_price, volume, "CRYPTO")
-            print(f"[{datetime.now()}] Данные собраны...")
-            time.sleep(1)
+            response = self.client.get_tickers(category="linear", symbol=self.symbol)
+            if response['retCode'] == 0:
+                ticker = response['result']['list'][0]
+                price = float(ticker['lastPrice'])
+                volume = float(ticker['volume24h'])
+
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO market_data (symbol, price, volume, source) VALUES (?, ?, ?, ?)",
+                    (self.symbol, price, volume, "BYBIT_TESTNET")
+                )
+                conn.commit()
+                conn.close()
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Saved {self.symbol} | Price: {price} | Vol: {volume}")
         except Exception as e:
-            print(f"Ошибка сбора: {e}")
-            time.sleep(5)
+            print(f"Error fetching data: {e}")
+
+    def run(self):
+        print(f"Starting T-Alpha Data Collector for {self.symbol}...")
+        while True:
+            self.fetch_and_store()
+            time.sleep(self.interval)
 
 if __name__ == "__main__":
-    start_collection()
+    # Запуск фонового демона
+    collector = DataCollector(symbol="BTCUSDT", interval=10)
+    collector.run()

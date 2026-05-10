@@ -1,53 +1,47 @@
 import sqlite3
-import pandas as pd
-from datetime import datetime
 import os
 
-class AlphaMemory:
-    def __init__(self, db_name="data/alpha_vault.db"):
-        os.makedirs("data", exist_ok=True)
-        self.db_name = db_name
-        self._init_tables()
+# База данных будет создана в корне проекта
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "t_alpha.db")
 
-    def _init_tables(self):
-        """Создаем таблицы, если их нет. Память должна быть вечной."""
-        with sqlite3.connect(self.db_name) as conn:
-            cursor = conn.cursor()
-            # Таблица котировок (для обучения ML)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS market_data (
-                    timestamp DATETIME,
-                    symbol TEXT,
-                    price REAL,
-                    volume REAL,
-                    market_type TEXT
-                )
-            """)
-            # Таблица логов ИИ (опыт и рассуждения)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ai_logic_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp DATETIME,
-                    symbol TEXT,
-                    decision TEXT,
-                    confidence REAL,
-                    context_snapshot TEXT,
-                    result_success INTEGER DEFAULT NULL
-                )
-            """)
-            conn.commit()
 
-    def save_market_tick(self, symbol, price, volume, m_type):
-        with sqlite3.connect(self.db_name) as conn:
-            conn.execute("INSERT INTO market_data VALUES (?, ?, ?, ?, ?)",
-                         (datetime.now(), symbol, price, volume, m_type))
+def get_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-    def log_ai_decision(self, symbol, decision, confidence, context):
-        with sqlite3.connect(self.db_name) as conn:
-            conn.execute("INSERT INTO ai_logic_logs (timestamp, symbol, decision, confidence, context_snapshot) VALUES (?, ?, ?, ?, ?)",
-                         (datetime.now(), symbol, decision, confidence, str(context)))
 
-    def get_last_prices(self, symbol, limit=100):
-        with sqlite3.connect(self.db_name) as conn:
-            query = f"SELECT * FROM market_data WHERE symbol = '{symbol}' ORDER BY timestamp DESC LIMIT {limit}"
-            return pd.read_sql_query(query, conn)
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Таблица для сырых рыночных данных (тиков)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS market_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            price REAL,
+            volume REAL,
+            source TEXT
+        )
+    ''')
+
+    # Таблица Experience Replay для самообучения
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS experience_replay (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            market_state TEXT,
+            ai_decision TEXT,
+            result_after_n_min REAL
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+
+
+if __name__ == "__main__":
+    init_db()
+    print("Database initialized successfully.")
