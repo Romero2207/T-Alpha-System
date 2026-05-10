@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime
 import pandas as pd
+import random
 
 class AlphaMemory:
     def __init__(self, db_path="data/alpha_memory.db"):
