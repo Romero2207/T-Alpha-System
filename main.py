@@ -23,7 +23,7 @@ pages = {
     ]
 }
 
-# Запуск навигации
+# Запуск навигации-
 pg = st.navigation(pages)
 
 # Общий стиль (Dark Finance Mode)
