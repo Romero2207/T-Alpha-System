@@ -1,47 +1,74 @@
 import time
 import sys
 import os
-from pybit.unified_trading import HTTP
+import json
 
-# Добавляем корневую директорию в PYTHONPATH для корректных импортов
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection, init_db
+from data.market_gateway import BybitGateway, MoexGateway, get_msk_time
+from ai.gigachat_api import AIEngine
+
 
 class DataCollector:
-    def __init__(self, symbol="BTCUSDT", interval=5):
-        self.symbol = symbol
-        self.interval = interval # Интервал сбора данных в секундах
-        # Инициализируем клиент Bybit Testnet
-        self.client = HTTP(testnet=True)
-        init_db() # Убеждаемся, что БД существует
+    def __init__(self, interval=20):
+        self.interval = interval
+        self.ai = AIEngine()
+        # Инициализируем рабочие шлюзы
+        self.bybit = BybitGateway(testnet=False)
+        self.moex = MoexGateway()
 
-    def fetch_and_store(self):
-        try:
-            response = self.client.get_tickers(category="linear", symbol=self.symbol)
-            if response['retCode'] == 0:
-                ticker = response['result']['list'][0]
-                price = float(ticker['lastPrice'])
-                volume = float(ticker['volume24h'])
+        # Список инструментов: (символ, шлюз, имя для БД)
+        self.assets = [
+            ("BTCUSDT", self.bybit, "BTCUSDT"),
+            ("SBER", self.moex, "SBER")
+        ]
+        init_db()
 
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO market_data (symbol, price, volume, source) VALUES (?, ?, ?, ?)",
-                    (self.symbol, price, volume, "BYBIT_TESTNET")
-                )
-                conn.commit()
-                conn.close()
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Saved {self.symbol} | Price: {price} | Vol: {volume}")
-        except Exception as e:
-            print(f"Error fetching data: {e}")
+    def store_data(self, symbol, price, volume, source, latency_ms, timestamp):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO market_data (symbol, price, volume, source, latency_ms, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (symbol, price, volume, source, latency_ms, timestamp)
+        )
+        conn.commit()
+        conn.close()
 
     def run(self):
-        print(f"Starting T-Alpha Data Collector for {self.symbol}...")
+        print(f"SYSTEM: MULTI-ASSET COLLECTOR ONLINE (MSK TIME)")
+        print("-" * 50)
         while True:
-            self.fetch_and_store()
+            for identifier, gateway, db_name in self.assets:
+                result = gateway.get_ticker(identifier)
+
+                if result["status"] == "success":
+                    self.store_data(
+                        db_name, result["price"], result["volume"],
+                        result["source"], result["latency_ms"], result["timestamp"]
+                    )
+
+                    # Анализ состояния
+                    current_state = f"Актив {db_name}. Текущая цена: {result['price']}."
+                    decision = self.ai.analyze_market_state(db_name, result["price"], result["volume"])
+
+                    # Сохранение в опыт
+                    conn = get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "INSERT INTO experience_replay (timestamp, market_state, ai_decision) VALUES (?, ?, ?)",
+                        (result["timestamp"], f"{db_name} | {current_state}", json.dumps(decision, ensure_ascii=False))
+                    )
+                    conn.commit()
+                    conn.close()
+
+                    print(f"[{result['timestamp']}] {db_name} | P: {result['price']} | AI: {decision.get('action')}")
+                else:
+                    print(f"[{get_msk_time()}] ERROR | {db_name} sync failed: {result.get('message')}")
+
+            print("-" * 50)
             time.sleep(self.interval)
 
+
 if __name__ == "__main__":
-    # Запуск фонового демона
-    collector = DataCollector(symbol="BTCUSDT", interval=10)
+    collector = DataCollector(interval=30)
     collector.run()

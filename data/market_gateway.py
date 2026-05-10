@@ -1,56 +1,83 @@
-import pandas as pd
-from pybit.unified_trading import HTTP
+import os
+import time
+from datetime import datetime
+import pytz
 import requests
-import config
+from pybit.unified_trading import HTTP
+from dotenv import load_dotenv
 
-class MarketGateway:
+load_dotenv()
+
+# Настройка временной зоны
+MSK = pytz.timezone('Europe/Moscow')
+
+
+def get_msk_time():
+    """Возвращает текущее время в МСК для записи в БД"""
+    return datetime.now(MSK).strftime('%Y-%m-%d %H:%M:%S')
+
+
+class BybitGateway:
+    def __init__(self, testnet=False):
+        self.client = HTTP(testnet=testnet)
+        self.source_name = "BYBIT_MAINNET" if not testnet else "BYBIT_TESTNET"
+
+    def get_ticker(self, symbol):
+        start_time = time.perf_counter()
+        try:
+            response = self.client.get_tickers(category="linear", symbol=symbol)
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
+            if response['retCode'] == 0:
+                ticker = response['result']['list'][0]
+                return {
+                    "status": "success",
+                    "price": float(ticker['lastPrice']),
+                    "volume": float(ticker['volume24h']),
+                    "latency_ms": latency_ms,
+                    "source": self.source_name,
+                    "timestamp": get_msk_time()
+                }
+            return {"status": "error", "message": response['retMsg']}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+
+class MoexGateway:
     def __init__(self):
-        self.session_bybit = HTTP(testnet=False)
-        self.t_token = str(config.T_INVEST_TOKEN).strip()
+        self.source_name = "MOEX_API"
 
-    def get_crypto_symbols(self):
-        """Динамический список всех USDT пар с Bybit"""
+    def get_ticker(self, symbol="SBER"):
+        start_time = time.perf_counter()
         try:
-            res = self.session_bybit.get_instruments_info(category="linear")
-            return sorted([item['symbol'] for item in res['result']['list'] if item['quoteCoin'] == 'USDT'])
-        except:
-            return ["BTCUSDT", "ETHUSDT"]
+            # Прямой запрос к открытому API Мосбиржи (без токенов)
+            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}.json?iss.meta=off&iss.only=marketdata"
+            response = requests.get(url, timeout=5)
+            latency_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
-    def get_stock_assets(self):
-        """Динамический список акций из Тинькофф"""
-        url = "https://invest-public-api.tinkoff.ru/rest/tinkoff.public.invest.api.itf.v1.InstrumentsService/Shares"
-        headers = {"Authorization": f"Bearer {self.t_token}", "Content-Type": "application/json"}
-        try:
-            r = requests.post(url, json={"instrumentStatus": "INSTRUMENT_STATUS_BASE"}, headers=headers)
-            shares = r.json().get('instruments', [])
-            return {s['ticker']: s['figi'] for s in shares}
-        except:
-            return {"SBER": "BBG004730N88"}
+            if response.status_code == 200:
+                data = response.json()
+                try:
+                    columns = data['marketdata']['columns']
+                    row = data['marketdata']['data'][0]
+                    market_dict = dict(zip(columns, row))
 
-    def get_price(self, symbol, market_type, figi=None):
-        if market_type == "Крипто":
-            try:
-                res = self.session_bybit.get_tickers(category="linear", symbol=symbol)
-                return float(res['result']['list'][0]['lastPrice'])
-            except: return 0.0
-        else:
-            url = "https://invest-public-api.tinkoff.ru/rest/tinkoff.public.invest.api.itf.v1.MarketDataService/GetLastPrices"
-            headers = {"Authorization": f"Bearer {self.t_token}", "Content-Type": "application/json"}
-            try:
-                r = requests.post(url, json={"figi": [figi]}, headers=headers)
-                p = r.json()['lastPrices'][0]['price']
-                return float(p['units']) + p['nano'] / 1e9
-            except: return 0.0
+                    # Если торги закрыты (выходной/ночь), LAST может быть пустым, берем средневзвешенную цену
+                    price = market_dict.get('LAST') or market_dict.get('WAPRICE') or 0.0
+                    volume = market_dict.get('VALTODAY') or 0.0
 
-    def get_ohlc(self, symbol, market_type):
-        """Метод получения свечей для графиков"""
-        if market_type == "Крипто":
-            try:
-                res = self.session_bybit.get_kline(category="linear", symbol=symbol, interval="60", limit=100)
-                raw = res['result']['list'][::-1]
-                df = pd.DataFrame(raw, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Vol', 'Turnover'])
-                df['Time'] = pd.to_datetime(df['Time'].astype(float), unit='ms')
-                for col in ['Open', 'High', 'Low', 'Close']: df[col] = pd.to_numeric(df[col])
-                return df
-            except: return pd.DataFrame()
-        return pd.DataFrame()
+                    if price:
+                        return {
+                            "status": "success",
+                            "price": float(price),
+                            "volume": float(volume),
+                            "latency_ms": latency_ms,
+                            "source": self.source_name,
+                            "timestamp": get_msk_time()
+                        }
+                    else:
+                        return {"status": "error", "message": "Рынок закрыт / Нет данных о цене"}
+                except IndexError:
+                    return {"status": "error", "message": "Неверный тикер или пустой ответ"}
+            return {"status": "error", "message": f"HTTP Error {response.status_code}"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}

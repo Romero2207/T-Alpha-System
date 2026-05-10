@@ -1,4 +1,8 @@
 streamlit
 pybit
 pandas
-sqlite3
+python-dotenv
+chromadb
+gigachat
+requests
+pytz
