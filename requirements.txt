@@ -6,3 +6,5 @@ chromadb
 gigachat
 requests
 pytz
+ta
+plotly

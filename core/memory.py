@@ -17,28 +17,19 @@ def get_connection():
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
-
+    # Таблица отслеживаемых инструментов (Watchlist)
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS market_data (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            price REAL,
-            volume REAL,
-            source TEXT,
-            latency_ms REAL
-        )
-    ''')
+            CREATE TABLE IF NOT EXISTS watchlist (
+                symbol TEXT PRIMARY KEY,
+                market_type TEXT
+            )
+        ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS experience_replay (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            market_state TEXT,
-            ai_decision TEXT,
-            result_after_n_min REAL
-        )
-    ''')
+    # Сразу добавим туда пару базовых активов по умолчанию, если таблица пуста
+    cursor.execute("SELECT count(*) FROM watchlist")
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("INSERT INTO watchlist (symbol, market_type) VALUES ('BTCUSDT', 'crypto')")
+        cursor.execute("INSERT INTO watchlist (symbol, market_type) VALUES ('SBER', 'stocks')")
     conn.commit()
     conn.close()
 

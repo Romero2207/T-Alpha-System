@@ -1,47 +1,35 @@
-import streamlit as st
+import subprocess
+import sys
+import time
 
-# Конфигурация окна (должна быть первым вызовом)
-st.set_page_config(
-    page_title="T-Alpha-System",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
 
-# Инъекция строгих стилей (Dark Finance & Monospace)
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+def start_system():
+    print("=" * 50)
+    print("Инициализация T-Alpha-System...")
+    print("=" * 50)
 
-    html, body, [class*="css"] {
-        font-family: 'Roboto Mono', monospace !important;
-    }
-    .stApp {
-        background-color: #0D1117;
-    }
-    h1, h2, h3, h4, h5, h6 {
-        color: #C9D1D9 !important;
-        font-weight: 700 !important;
-    }
-    p, span, div {
-        color: #8B949E !important;
-    }
-    </style>
-""", unsafe_allow_html=True)
+    # 1. Запуск движка (Сборщик данных и ИИ)
+    print("[1/2] Запуск фонового движка (Core Engine)...")
+    engine_process = subprocess.Popen([sys.executable, "engine/data_collector.py"])
+    time.sleep(3)  # Ждем 3 секунды, чтобы база данных успела открыться
 
-# Главный заголовок
-st.title("T-ALPHA-SYSTEM // COMMAND CENTER")
-st.markdown("---")
+    # 2. Запуск браузера (Визуальный терминал Streamlit)
+    print("[2/2] Запуск Web-Терминала (UI)...")
+    ui_process = subprocess.Popen([sys.executable, "-m", "streamlit", "run", "ui/terminal.py"])
 
-# Настройка навигации
-pages = {
-    "MARKET HUBS": [
-        st.Page("ui/crypto_hub.py", title="Crypto Hub"),
-        st.Page("ui/stocks_hub.py", title="Stocks Hub"),
-    ],
-    "SYSTEM & LOGIC": [
-        st.Page("ui/ai_training.py", title="AI Training & Memory"),
-    ]
-}
+    print("\n✅ СИСТЕМА УСПЕШНО ЗАПУЩЕНА!")
+    print("Чтобы остановить бота, нажмите Ctrl+C в этом окне.")
 
-pg = st.navigation(pages)
-pg.run()
+    # Оставляем скрипт работать и следить за процессами
+    try:
+        engine_process.wait()
+        ui_process.wait()
+    except KeyboardInterrupt:
+        print("\n🛑 Получен сигнал на остановку...")
+        engine_process.terminate()
+        ui_process.terminate()
+        print("T-Alpha-System выключена. До встречи.")
+
+
+if __name__ == "__main__":
+    start_system()
