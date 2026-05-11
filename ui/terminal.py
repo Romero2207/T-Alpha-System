@@ -28,31 +28,35 @@ st.markdown("""
     .buy-text { color: #0ECB81 !important; font-weight: bold;}
     .sell-text { color: #F6465D !important; font-weight: bold;}
     div[data-testid="metric-container"] { padding: 5px 0px; }
+    .stButton>button { width: 100%; } /* Убрали параметр из питона, перенесли в CSS для кнопок */
 </style>
 """, unsafe_allow_html=True)
 
 
-# --- БЫСТРАЯ ЗАГРУЗКА ДАННЫХ НАПРЯМУЮ С БИРЖИ (Для UI) ---
-@st.cache_data(ttl=60)  # Кэш на 1 минуту, чтобы график не моргал при каждом клике
+@st.cache_data(ttl=60)
 def fetch_live_chart(symbol, market_type):
-    """Мгновенно качает 200 свечей для графика прямо с биржи"""
+    """Качает 15-минутные свечи для плотного и красивого графика"""
     df = pd.DataFrame()
     try:
         if market_type == "crypto":
             client = HTTP(testnet=False)
-            res = client.get_kline(category="linear", symbol=symbol, interval=1, limit=200)
+            # Изменили интервал на 15 минут, лимит 500 (~5 дней истории)
+            res = client.get_kline(category="linear", symbol=symbol, interval=15, limit=500)
             if res['retCode'] == 0:
                 klines = res['result']['list']
                 df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
                 df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
-        else:
-            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=1"
-            res = requests.get(url, timeout=5).json()
-            candles = res['candles']['data']
-            cols = res['candles']['columns']
-            df = pd.DataFrame(candles, columns=cols)
-            df = df.rename(columns={'end': 'timestamp'})
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            else:
+                # Мосбиржа: запрашиваем данные ТОЛЬКО за последние 14 дней, чтобы не улететь в 2011 год
+                from datetime import datetime, timedelta
+                start_date = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
+                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=10&from={start_date}"
+                res = requests.get(url, timeout=5).json()
+                candles = res['candles']['data']
+                cols = res['candles']['columns']
+                df = pd.DataFrame(candles, columns=cols)
+                df = df.rename(columns={'end': 'timestamp'})
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
 
         if not df.empty:
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(
@@ -99,11 +103,9 @@ def load_user_portfolio(fiat_symbol, asset_symbol):
     return fiat_bal, asset_bal, avg_entry, logs
 
 
-# --- ГЛАВНЫЙ ИНТЕРФЕЙС ---
 tab_terminal, tab_ai_screener = st.tabs(["📊 РУЧНОЙ ТЕРМИНАЛ", "🧠 AI-СКРИНЕР (АВТОПИЛОТ)"])
 
 with tab_terminal:
-    # Переключатель рынков внутри терминала
     market_mode = st.radio("Рынок:", ["Криптовалюта (Bybit)", "Фондовый рынок (MOEX)"], horizontal=True,
                            label_visibility="collapsed")
 
@@ -114,13 +116,11 @@ with tab_terminal:
     fiat = "USDT" if is_crypto else "RUB"
     fiat_sign = "$" if is_crypto else "₽"
 
-    # Выбор инструмента
     col_sel, col_p, col_c, col_b, col_a = st.columns([2, 1, 1, 1, 1])
     with col_sel:
         symbol = st.selectbox("Инструмент", assets, index=assets.index(default_asset) if default_asset in assets else 0,
                               label_visibility="collapsed")
 
-    # МГНОВЕННАЯ загрузка графика и балансов
     df_chart = fetch_live_chart(symbol, market_type)
     fiat_bal, asset_bal, avg_entry, df_logs = load_user_portfolio(fiat, symbol)
 
@@ -130,11 +130,10 @@ with tab_terminal:
     else:
         current_price, change_pct = 0.0, 0.0
 
-    # Метрики
     with col_p:
         st.metric("Цена", f"{fiat_sign}{current_price:,.2f}")
     with col_c:
-        st.metric("Динамика (24h)", f"{change_pct:+.2f}%", delta_color="normal" if change_pct >= 0 else "inverse")
+        st.metric("Динамика", f"{change_pct:+.2f}%", delta_color="normal" if change_pct >= 0 else "inverse")
     with col_b:
         st.metric(f"Свободно ({fiat})", f"{fiat_sign}{fiat_bal:,.2f}")
     with col_a:
@@ -146,7 +145,6 @@ with tab_terminal:
 
     with main_col:
         if not df_chart.empty:
-            # Отрисовка профи-графика с объемами
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
             fig.add_trace(go.Candlestick(
                 x=df_chart['timestamp'], open=df_chart['open'], high=df_chart['high'], low=df_chart['low'],
@@ -162,15 +160,27 @@ with tab_terminal:
                 height=600, margin=dict(l=0, r=50, t=10, b=0), plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14',
                 xaxis_rangeslider_visible=False, showlegend=False, dragmode='pan'
             )
+
+            # Настройка осей и схлопывание дыр для Фондового рынка
             fig.update_yaxes(showgrid=True, gridcolor='#1F242F', side="right", row=1)
             fig.update_yaxes(showgrid=False, showticklabels=False, row=2)
-            fig.update_xaxes(showgrid=True, gridcolor='#1F242F', row=2)
 
+            if market_type == "stocks":
+                # Скрываем нерабочие часы Мосбиржи (с 19:00 до 10:00) и выходные (Суббота-Воскресенье)
+                hide_breaks = [
+                    dict(bounds=["sat", "mon"]),
+                    dict(bounds=[19, 10], pattern="hour")
+                ]
+                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=1)
+                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=2)
+            else:
+                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', row=2)
+
+            # Избавились от желтых ошибок use_container_width
             st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False})
         else:
             st.warning("Ожидание данных от API биржи...")
 
-        # Таблица PnL
         st.markdown("#### ОТКРЫТЫЕ ПОЗИЦИИ")
         if asset_bal > 0:
             unrealized_pnl = (current_price - avg_entry) * asset_bal
@@ -197,16 +207,14 @@ with tab_terminal:
         st.markdown("##### РУЧНОЙ ОРДЕР (MARKET)")
         b1, b2 = st.columns(2)
         with b1:
-            if st.button("🟢 BUY", use_container_width=True, key="buy_btn"):
+            if st.button("🟢 BUY", key="buy_btn"):
                 portfolio.execute_paper_trade(symbol, "BUY", current_price)
                 st.rerun()
         with b2:
-            if st.button("🔴 SELL", use_container_width=True, key="sell_btn"):
+            if st.button("🔴 SELL", key="sell_btn"):
                 portfolio.execute_paper_trade(symbol, "SELL", current_price)
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
-
-        # Сюда можно вывести историю ручных сделок или стакан.
 
 with tab_ai_screener:
     st.header("🌐 ГЛОБАЛЬНЫЙ СКАНЕР РЫНКА (АВТОПИЛОТ)")
@@ -216,7 +224,7 @@ with tab_ai_screener:
 
     col_upd, _ = st.columns([1, 5])
     with col_upd:
-        if st.button("🔄 Обновить радар", use_container_width=True):
+        if st.button("🔄 Обновить радар"):
             st.rerun()
 
     conn = get_connection()
@@ -240,19 +248,15 @@ with tab_ai_screener:
                 state = row['market_state']
                 symbol = state.split("Актив ")[1].split(".")[0]
 
-                # Иконки для красоты
                 icon = "🟢" if "BUY" in action and "Blocked" not in action else "🔴" if "SELL" in action and "Blocked" not in action else "⚪"
 
-                # Создаем раскрывающуюся карточку
                 with st.expander(
                         f"{icon} {row['timestamp']} | {symbol} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
                     st.write(f"**Обоснование ИИ:** {reason}")
 
-                    # Детальные метрики внутри карточки
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Цена входа", f"${price:,.4f}")
 
-                    # Подсвечиваем TP зеленым, SL красным, если они заданы
                     tp_color = "normal" if tp > price else "off"
                     m2.metric("Take Profit", f"${tp:,.4f}" if tp > 0 else "N/A",
                               delta=f"{((tp - price) / price) * 100:.2f}%" if tp > 0 else None, delta_color=tp_color)
@@ -263,10 +267,8 @@ with tab_ai_screener:
 
                     m4.metric("Уверенность", f"{conf}%")
 
-                    # Ручное управление: если бот заблокировал сделку (колдаун или RSI), ты можешь форсировать её руками
                     if st.button(f"Торговать {symbol} вручную", key=f"force_trade_{index}_{symbol}"):
                         st.info("Перейдите во вкладку 'Ручной Терминал' для точного исполнения.")
-
             except Exception as e:
                 pass
     else:

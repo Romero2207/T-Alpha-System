@@ -3,7 +3,6 @@ import sys
 import os
 import json
 import pandas as pd
-import requests
 import ta
 from pybit.unified_trading import HTTP
 from datetime import datetime
@@ -14,16 +13,17 @@ from ai.gigachat_api import AIEngine
 from engine.risk_manager import RiskManager
 from engine.portfolio_manager import PortfolioManager
 
+
 class GlobalScanner:
     def __init__(self):
         self.ai = AIEngine()
         self.risk_manager = RiskManager()
-        self.portfolio = PortfolioManager() # Добавили кошелек
+        self.portfolio = PortfolioManager()
         self.bybit = HTTP(testnet=False)
         init_db()
 
     def get_top_volatile_crypto(self, limit=3):
-        """Сканирует ВСЕ монеты на Bybit и выбирает самые активные (аномалии)"""
+        """Сканирует ВСЕ монеты на Bybit и выбирает самые активные"""
         try:
             res = self.bybit.get_tickers(category="linear")
             if res['retCode'] != 0: return []
@@ -33,13 +33,13 @@ class GlobalScanner:
 
             for t in tickers:
                 symbol = t['symbol']
-                # Берем только USDT пары, без мусорных токенов
+                # Отсекаем мусор и смотрим только на пары к USDT
                 if symbol.endswith('USDT') and not symbol.startswith('1000'):
                     turnover = float(t['turnover24h'])
                     change_pct = float(t['price24hPcnt']) * 100
                     price = float(t['lastPrice'])
 
-                    # Фильтр: Ищем монеты с объемом больше $10 млн, которые сделали сильное движение
+                    # Ищем монеты с объемом больше $10 млн и движением > 3%
                     if turnover > 10000000 and abs(change_pct) > 3.0:
                         hot_assets.append({
                             'symbol': symbol,
@@ -48,38 +48,57 @@ class GlobalScanner:
                             'volume': turnover
                         })
 
-            # Сортируем по модулю изменения (самые сильные падения или взлеты)
             hot_assets.sort(key=lambda x: abs(x['change']), reverse=True)
             return hot_assets[:limit]
         except Exception as e:
             print(f"Ошибка сканирования крипторынка: {e}")
             return []
 
-    def get_live_rsi(self, symbol, window=14):
-        """Мгновенно качает свежие свечи для расчета RSI горячей монеты"""
+    def get_technical_indicators(self, symbol, window=14):
+        """Рассчитывает RSI, MACD, Bollinger Bands и ATR"""
         try:
-            res = self.bybit.get_kline(category="linear", symbol=symbol, interval=5, limit=window + 5)
+            res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=window + 30)
             if res['retCode'] == 0:
                 klines = res['result']['list']
                 klines.reverse()
                 df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                df['close'] = df['close'].astype(float)
+                for col in ['open', 'high', 'low', 'close']:
+                    df[col] = df[col].astype(float)
 
-                rsi_indicator = ta.momentum.RSIIndicator(close=df['close'], window=window)
-                current_rsi = rsi_indicator.rsi().iloc[-1]
-                return round(current_rsi, 2) if not pd.isna(current_rsi) else 50.0
-        except:
+                # 1. RSI
+                rsi = ta.momentum.RSIIndicator(close=df['close'], window=window).rsi().iloc[-1]
+
+                # 2. MACD
+                macd_ind = ta.trend.MACD(close=df['close'])
+                macd_hist = macd_ind.macd_diff().iloc[-1]  # Гистограмма MACD
+
+                # 3. Bollinger Bands
+                bb_ind = ta.volatility.BollingerBands(close=df['close'])
+                bb_high = bb_ind.bollinger_hband().iloc[-1]
+                bb_low = bb_ind.bollinger_lband().iloc[-1]
+
+                # 4. ATR (Средняя волатильность)
+                atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
+                                                     window=14).average_true_range().iloc[-1]
+
+                return {
+                    "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
+                    "macd_hist": round(macd_hist, 6),
+                    "bb_high": round(bb_high, 4),
+                    "bb_low": round(bb_low, 4),
+                    "atr": round(atr, 4)
+                }
+        except Exception as e:
             pass
-        return 50.0
+        # Значения по умолчанию при ошибке
+        return {"rsi": 50.0, "macd_hist": 0, "bb_high": 0, "bb_low": 0, "atr": 0}
 
     def run(self):
         print("=" * 50)
-        print("СИСТЕМА: ГЛОБАЛЬНЫЙ AI-СКАНЕР ЗАПУЩЕН")
-        print("Радар охватывает 300+ активов. Поиск аномалий...")
+        print("🚀 СИСТЕМА: ГЛОБАЛЬНЫЙ AI-СКАНЕР ЗАПУЩЕН (УРОВЕНЬ 1: ТРЕНД И ВОЛАТИЛЬНОСТЬ)")
         print("=" * 50)
 
         while True:
-            # 1. Сканируем весь рынок одним запросом
             top_crypto = self.get_top_volatile_crypto(limit=3)
 
             for asset in top_crypto:
@@ -87,28 +106,26 @@ class GlobalScanner:
                 price = asset['price']
                 change = asset['change']
 
-                # 2. Вычисляем математику для найденной аномалии
-                rsi = self.get_live_rsi(symbol)
-                state_desc = f"Обнаружена аномалия! Актив {symbol}. Изменение за 24ч: {change:+.2f}%. Цена: {price}. RSI: {rsi}."
+                # Получаем полный пак индикаторов
+                inds = self.get_technical_indicators(symbol)
 
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] РАДАР: {symbol} | Δ: {change:+.2f}% | RSI: {rsi}")
+                state_desc = f"Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}. Индикаторы собраны."
+                print(
+                    f"[{datetime.now().strftime('%H:%M:%S')}] РАДАР: {symbol} | RSI: {inds['rsi']} | MACD_H: {inds['macd_hist']} | ATR: {inds['atr']}")
 
-                # 3. Отдаем ИИ на анализ
-                decision = self.ai.analyze_market_state(symbol, price, asset['volume'], rsi=rsi)
+                # Отдаем ИИ цену, объем и ВЕСЬ пак индикаторов
+                decision = self.ai.analyze_market_state(symbol, price, asset['volume'], inds)
 
-                # Добавляем данные о рынке в решение для красоты в UI
                 decision['market_change'] = round(change, 2)
                 decision['current_price'] = price
 
-                # 4. Прогоняем через Риск-Менеджмент
                 action = decision.get('action', 'HOLD')
                 if action in ["BUY", "SELL"]:
-                    approved, rm_reason = self.risk_manager.approve_signal(symbol, action, price, rsi)
+                    approved, rm_reason = self.risk_manager.approve_signal(symbol, action, price, inds['rsi'])
                     if not approved:
                         decision['action'] = f"HOLD (Blocked: {action})"
                         decision['reason'] = rm_reason
                     else:
-                        # АВТОПИЛОТ В ДЕЙСТВИИ: Если фильтры пройдены, бот торгует сам!
                         trade_ok = self.portfolio.execute_paper_trade(symbol, action, price)
                         if trade_ok:
                             print(
@@ -116,7 +133,6 @@ class GlobalScanner:
                         else:
                             decision['action'] = f"HOLD (No Funds for {action})"
 
-                # 5. Сохраняем в историю (Это прочитает вкладка AI-Скринер в UI)
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute(
@@ -126,7 +142,6 @@ class GlobalScanner:
                 conn.commit()
                 conn.close()
 
-            # Скринер отдыхает 60 секунд перед новым глобальным сканом
             time.sleep(60)
 
 
