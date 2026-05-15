@@ -6,39 +6,29 @@ import os
 
 def start_system():
     print("=" * 50)
-    print("Инициализация T-Alpha-System...")
+    print("ВОССТАНОВЛЕНИЕ T-ALPHA PRO...")
     print("=" * 50)
 
-    # 1. Запуск движка
-    print("[1/2] Запуск фонового движка (Core Engine)...")
+    # 1. Движок
     collector_script = os.path.join("engine", "data_collector.py")
     subprocess.Popen([sys.executable, collector_script])
+
     time.sleep(2)
 
-    # 2. Запуск Терминала (Авто-открытие браузера)
-    print("[2/2] Запуск Web-Терминала (UI)...")
+    # 2. Терминал (Стабильный режим)
     terminal_script = os.path.join("ui", "terminal.py")
-
-    # Жесткая привязка к 127.0.0.1 обходит баги Windows с localhost.
-    # Браузер откроется сам!
     subprocess.Popen([
         sys.executable, "-m", "streamlit", "run", terminal_script,
-        "--server.port", "8501",
-        "--server.address", "127.0.0.1",
         "--server.runOnSave", "false",
         "--server.fileWatcherType", "none",
-        "--browser.gatherUsageStats", "false"
+        "--server.address", "127.0.0.1"
     ])
 
-    print("\n✅ СИСТЕМА УСПЕШНО ЗАПУЩЕНА!")
-    print("Браузер сейчас откроется автоматически...")
-    print("Чтобы остановить бота, нажмите Ctrl+C в этом окне.")
-
+    print("\n✅ СИСТЕМА ЗАПУЩЕНА! Откройте http://127.0.0.1:8501")
     try:
-        while True:
-            time.sleep(1)
+        while True: time.sleep(1)
     except KeyboardInterrupt:
-        print("\nОстановка T-Alpha-System...")
+        print("\nВыключение...")
 
 
 if __name__ == "__main__":
