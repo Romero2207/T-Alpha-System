@@ -21,15 +21,23 @@ def init_db():
     # 1. Таблица отслеживаемых инструментов
     cursor.execute('''CREATE TABLE IF NOT EXISTS watchlist (symbol TEXT PRIMARY KEY, market_type TEXT)''')
 
-    # 2. Таблица кошелька (Портфель)
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS portfolio (symbol TEXT PRIMARY KEY, amount REAL, average_entry_price REAL DEFAULT 0.0)''')
+    # 2. Таблица кошелька (Портфель) - ВАЖНО: ДОБАВЛЕНЫ СТОПЫ И ТРЕЙЛИНГ
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS portfolio (
+            symbol TEXT PRIMARY KEY, 
+            amount REAL, 
+            average_entry_price REAL DEFAULT 0.0,
+            take_profit REAL DEFAULT 0.0,
+            stop_loss REAL DEFAULT 0.0,
+            high_water_mark REAL DEFAULT 0.0
+        )
+    ''')
 
     # 3. Таблица истории сделок
     cursor.execute('''CREATE TABLE IF NOT EXISTS trade_history (
                         id INTEGER PRIMARY KEY AUTOINCREMENT, 
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, 
-                        symbol TEXT, action TEXT, price REAL, amount REAL, total_value REAL)''')
+                        symbol TEXT, action TEXT, price REAL, amount REAL, total_value REAL, reason TEXT)''')
 
     # 4. Таблица сырых рыночных данных
     cursor.execute('''CREATE TABLE IF NOT EXISTS market_data (

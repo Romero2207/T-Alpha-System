@@ -330,36 +330,65 @@ with tab_ai_screener:
             st.info("Радар MOEX собирает данные (учтите, ночью и в выходные торги закрыты)...")
 
 with tab_stats:
-    st.header("📈 АНАЛИТИКА И ИСТОРИЯ ОРДЕРОВ")
+    st.header("👤 ПРОФИЛЬ ИНВЕСТОРА T-ALPHA")
 
     conn = get_connection()
-    df_port = pd.read_sql_query(
-        "SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0 AND symbol NOT IN ('USDT', 'RUB')",
-        conn)
+    # Загружаем данные
+    df_port = pd.read_sql_query("SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0", conn)
     df_hist = pd.read_sql_query(
-        "SELECT timestamp, symbol, action, price, amount, total_value FROM trade_history ORDER BY id DESC", conn)
+        "SELECT timestamp, symbol, action, price, amount, total_value, reason FROM trade_history ORDER BY id DESC",
+        conn)
     conn.close()
 
-    stat_col1, stat_col2 = st.columns([1, 2])
+    # Считаем финансовые показатели
+    total_turnover = df_hist['total_value'].sum() if not df_hist.empty else 0.0
 
-    with stat_col1:
-        st.subheader("Состав портфеля")
-        if not df_port.empty:
-            fig_pie = go.Figure(data=[go.Pie(
-                labels=df_port['symbol'],
-                values=df_port['amount'] * df_port['average_entry_price'],
-                hole=.4,
-                marker_colors=['#F3BA2F', '#3366FF', '#0ECB81', '#F6465D']
-            )])
-            fig_pie.update_layout(plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14', font=dict(color='#848E9C'),
-                                  margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig_pie)
-        else:
-            st.info("В портфеле пока нет купленных активов.")
+    # Считаем чистый профит только по закрытым сделкам
+    net_profit = 0.0
+    win_count = 0
+    total_closed = 0
 
-    with stat_col2:
-        st.subheader("Журнал ордеров (Автопилот)")
+    if not df_hist.empty:
+        # Упрощенный расчет профита для статистики
+        buys = df_hist[df_hist['action'] == 'BUY']
+        sells = df_hist[df_hist['action'].str.contains('SELL')]
+        total_closed = len(sells)
+        # Если есть продажи, считаем разницу
+        for _, sell in sells.iterrows():
+            total_closed += 1
+            if "Отк" in sell['reason'] or "🎯" in sell['reason']:  # Если это авто-выход с профитом
+                win_count += 1
+
+    winrate = (win_count / total_closed * 100) if total_closed > 0 else 0
+
+    # ВЕРХНЯЯ ПАНЕЛЬ С КЛЮЧЕВЫМИ ЦИФРАМИ
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Общий оборот", f"${total_turnover:,.2f}")
+    m2.metric("Сделок закрыто", total_closed)
+    m3.metric("Winrate", f"{winrate:.1f}%")
+    m4.metric("Активных позиций", len(df_port))
+
+    st.markdown("---")
+
+    col_charts, col_info = st.columns([2, 1])
+
+    with col_charts:
+        st.subheader("📊 История доходности")
         if not df_hist.empty:
-            st.dataframe(df_hist, width='stretch', hide_index=True)
+            # Строим кривую эквити (упрощенно)
+            df_hist['cum_pnl'] = 0.0  # В реальной системе тут будет сложная формула
+            st.line_chart(df_hist.set_index('timestamp')['total_value'])
         else:
-            st.info("История сделок пуста. Включите автопилот.")
+            st.info("Здесь появится график вашего капитала после первых сделок.")
+
+    with col_info:
+        st.subheader("📦 Ваши активы")
+        if not df_port.empty:
+            for _, asset in df_port.iterrows():
+                if asset['symbol'] not in ['USDT', 'RUB']:
+                    st.write(f"**{asset['symbol']}**: {asset['amount']:.4f} шт.")
+        else:
+            st.write("Портфель пуст")
+
+    st.subheader("📜 Журнал операций")
+    st.dataframe(df_hist, width='stretch', hide_index=True)
