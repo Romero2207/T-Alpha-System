@@ -278,37 +278,56 @@ with tab_ai_screener:
         if st.button("🔄 Обновить радар"):
             st.rerun()
 
+    # Разделяем скринер на две под-вкладки
+    sub_crypto, sub_stocks = st.tabs(["🪙 РАДАР BYBIT (24/7)", "🏛️ РАДАР MOEX (Фонда)"])
+
     conn = get_connection()
     df_signals = pd.read_sql_query(
-        "SELECT timestamp, market_state, ai_decision FROM experience_replay WHERE market_state LIKE '%Аномалия:%' ORDER BY id DESC LIMIT 20",
+        "SELECT timestamp, market_state, ai_decision FROM experience_replay WHERE market_state LIKE '%Аномалия:%' ORDER BY id DESC LIMIT 40",
         conn)
     conn.close()
 
-    if not df_signals.empty:
-        for index, row in df_signals.iterrows():
-            try:
-                dec = json.loads(row['ai_decision'])
-                action = dec.get("action", "HOLD")
-                conf = dec.get("confidence", 0)
-                reason = dec.get("reason", "Анализ завершен")
-                price = dec.get("current_price", 0.0)
-                change = dec.get("market_change", 0.0)
 
-                state = row['market_state']
-                sym = state.split("Аномалия: ")[1].split(".")[0]
+    def render_signal_card(row, sym):
+        try:
+            dec = json.loads(row['ai_decision'])
+            action = dec.get("action", "HOLD")
+            conf = dec.get("confidence", 0)
+            reason = dec.get("reason", "Анализ завершен")
+            price = dec.get("current_price", 0.0)
+            change = dec.get("market_change", 0.0)
 
-                icon = "🟢" if "BUY" in action and "Blocked" not in action else "🔴" if "SELL" in action and "Blocked" not in action else "⚪"
+            icon = "🟢" if "BUY" in action and "Blocked" not in action else "🔴" if "SELL" in action and "Blocked" not in action else "⚪"
 
-                with st.expander(f"{icon} {row['timestamp']} | {sym} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
-                    st.write(f"**Обоснование ИИ:** {reason}")
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Цена входа", f"${price:,.4f}")
-                    m2.metric("Take Profit", f"${dec.get('take_profit', 0.0):,.4f}")
-                    m3.metric("Stop Loss", f"${dec.get('stop_loss', 0.0):,.4f}")
-            except:
-                pass
-    else:
-        st.info("Радар пока не обнаружил аномалий. (Сканер собирает данные, подождите...)")
+            with st.expander(f"{icon} {row['timestamp']} | {sym} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
+                st.write(f"**Обоснование ИИ:** {reason}")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Цена входа", f"{price:,.4f}")
+                m2.metric("Take Profit", f"{dec.get('take_profit', 0.0):,.4f}")
+                m3.metric("Stop Loss", f"{dec.get('stop_loss', 0.0):,.4f}")
+        except Exception as e:
+            pass
+
+
+    # Фильтруем и выводим крипту
+    with sub_crypto:
+        crypto_signals = df_signals[df_signals['market_state'].str.contains(r'\[CRYPTO\]')]
+        if not crypto_signals.empty:
+            for index, row in crypto_signals.iterrows():
+                sym = row['market_state'].split("Аномалия: ")[1].split(".")[0]
+                render_signal_card(row, sym)
+        else:
+            st.info("Радар Bybit собирает данные, подождите...")
+
+    # Фильтруем и выводим акции
+    with sub_stocks:
+        stock_signals = df_signals[df_signals['market_state'].str.contains(r'\[MOEX\]')]
+        if not stock_signals.empty:
+            for index, row in stock_signals.iterrows():
+                sym = row['market_state'].split("Аномалия: ")[1].split(".")[0]
+                render_signal_card(row, sym)
+        else:
+            st.info("Радар MOEX собирает данные (учтите, ночью и в выходные торги закрыты)...")
 
 with tab_stats:
     st.header("📈 АНАЛИТИКА И ИСТОРИЯ ОРДЕРОВ")

@@ -3,6 +3,7 @@ import sys
 import os
 import json
 import pandas as pd
+import requests
 import ta
 from pybit.unified_trading import HTTP
 from datetime import datetime
@@ -12,6 +13,7 @@ from core.memory import get_connection, init_db
 from ai.gigachat_api import AIEngine
 from engine.risk_manager import RiskManager
 from engine.portfolio_manager import PortfolioManager
+from core.notifier import TelegramNotifier
 
 
 class GlobalScanner:
@@ -19,121 +21,141 @@ class GlobalScanner:
         self.ai = AIEngine()
         self.risk_manager = RiskManager()
         self.portfolio = PortfolioManager()
+        self.notifier = TelegramNotifier()
         self.bybit = HTTP(testnet=False)
         init_db()
 
-    def get_top_volatile_crypto(self, limit=3):
-        """Сканирует ВСЕ монеты на Bybit и выбирает самые активные"""
+    def get_top_volatile_crypto(self, limit=2):
+        """Сканирует Bybit на аномалии"""
         try:
             res = self.bybit.get_tickers(category="linear")
             if res['retCode'] != 0: return []
-
             tickers = res['result']['list']
-            hot_assets = []
-
+            hot = []
             for t in tickers:
                 symbol = t['symbol']
-                # Отсекаем мусор и смотрим только на пары к USDT
                 if symbol.endswith('USDT') and not symbol.startswith('1000'):
                     turnover = float(t['turnover24h'])
                     change_pct = float(t['price24hPcnt']) * 100
                     price = float(t['lastPrice'])
-
-                    # Ищем монеты с объемом больше $10 млн и движением > 3%
                     if turnover > 10000000 and abs(change_pct) > 3.0:
-                        hot_assets.append({
-                            'symbol': symbol,
-                            'price': price,
-                            'change': change_pct,
-                            'volume': turnover
-                        })
-
-            hot_assets.sort(key=lambda x: abs(x['change']), reverse=True)
-            return hot_assets[:limit]
-        except Exception as e:
-            print(f"Ошибка сканирования крипторынка: {e}")
+                        hot.append({'symbol': symbol, 'price': price, 'change': change_pct, 'volume': turnover,
+                                    'market': 'crypto'})
+            hot.sort(key=lambda x: abs(x['change']), reverse=True)
+            return hot[:limit]
+        except:
             return []
 
-    def get_technical_indicators(self, symbol, window=14):
-        """Рассчитывает RSI, MACD, Bollinger Bands, ATR и Свечные паттерны"""
+    def get_top_volatile_stocks(self, limit=2):
+        """Сканирует всю Мосбиржу (TQBR) на аномалии"""
         try:
-            res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=window + 30)
-            if res['retCode'] == 0:
-                klines = res['result']['list']
-                klines.reverse()
-                df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                for col in ['open', 'high', 'low', 'close']:
-                    df[col] = df[col].astype(float)
+            url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.only=marketdata"
+            res = requests.get(url, timeout=5).json()
+            data = res['marketdata']['data']
+            cols = res['marketdata']['columns']
 
-                rsi = ta.momentum.RSIIndicator(close=df['close'], window=window).rsi().iloc[-1]
-                macd_hist = ta.trend.MACD(close=df['close']).macd_diff().iloc[-1]
+            idx_secid = cols.index('SECID')
+            idx_last = cols.index('LAST')
+            idx_vol = cols.index('VALTODAY')
+            idx_change = cols.index('LASTTOPREVPRICE')
 
-                bb_ind = ta.volatility.BollingerBands(close=df['close'])
-                bb_high = bb_ind.bollinger_hband().iloc[-1]
-                bb_low = bb_ind.bollinger_lband().iloc[-1]
+            hot = []
+            for row in data:
+                symbol = row[idx_secid]
+                price = row[idx_last]
+                vol = row[idx_vol]
+                change = row[idx_change]
 
-                atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
-                                                     window=14).average_true_range().iloc[-1]
+                # Фильтр: есть данные, объем больше 50 млн рублей, движение больше 1.5% (фонда менее волатильна)
+                if price and vol and change and vol > 50000000 and abs(change) > 1.5:
+                    hot.append({'symbol': symbol, 'price': float(price), 'change': float(change), 'volume': float(vol),
+                                'market': 'stocks'})
 
-                # --- РАСПОЗНАВАНИЕ СВЕЧНЫХ ПАТТЕРНОВ ---
-                # Берем последнюю закрытую свечу (prev) и текущую (curr)
-                prev = df.iloc[-2]
-                curr = df.iloc[-1]
-
-                # 1. Doji (Крест) - тело свечи меньше 10% от ее длины
-                is_doji = abs(curr['close'] - curr['open']) <= (curr['high'] - curr['low']) * 0.1
-
-                # 2. Бычье поглощение (Bullish Engulfing)
-                is_bull_engulf = (prev['close'] < prev['open']) and \
-                                 (curr['close'] > curr['open']) and \
-                                 (curr['close'] >= prev['open']) and \
-                                 (curr['open'] <= prev['close'])
-
-                # 3. Медвежье поглощение (Bearish Engulfing)
-                is_bear_engulf = (prev['close'] > prev['open']) and \
-                                 (curr['close'] < curr['open']) and \
-                                 (curr['open'] >= prev['close']) and \
-                                 (curr['close'] <= prev['open'])
-
-                pattern = "Doji (Флэт/Неопределенность)" if is_doji else \
-                    "Бычье поглощение (Сильный сигнал ВВЕРХ)" if is_bull_engulf else \
-                        "Медвежье поглощение (Сильный сигнал ВНИЗ)" if is_bear_engulf else "Нет явного паттерна"
-
-                return {
-                    "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
-                    "macd_hist": round(macd_hist, 6),
-                    "bb_high": round(bb_high, 4),
-                    "bb_low": round(bb_low, 4),
-                    "atr": round(atr, 4),
-                    "pattern": pattern
-                }
+            hot.sort(key=lambda x: abs(x['change']), reverse=True)
+            return hot[:limit]
         except Exception as e:
-            pass
-        return {"rsi": 50.0, "macd_hist": 0, "bb_high": 0, "bb_low": 0, "atr": 0, "pattern": "Нет данных"}
+            print(f"Ошибка MOEX: {e}")
+            return []
+
+    def get_technical_indicators(self, symbol, market="crypto", window=14):
+        """Универсальный расчет ТА для крипты и акций"""
+        try:
+            if market == "crypto":
+                res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=window + 30)
+                if res['retCode'] == 0:
+                    klines = res['result']['list']
+                    klines.reverse()
+                    df = pd.DataFrame(klines,
+                                      columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+                else:
+                    return None
+            else:
+                # Скачиваем историю MOEX для расчета индикаторов
+                from datetime import timedelta
+                start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=10&from={start_date}"
+                res = requests.get(url, timeout=5).json()
+                df = pd.DataFrame(res['candles']['data'], columns=res['candles']['columns'])
+                if df.empty: return None
+
+            for col in ['open', 'high', 'low', 'close']:
+                df[col] = df[col].astype(float)
+
+            rsi = ta.momentum.RSIIndicator(close=df['close'], window=window).rsi().iloc[-1]
+            macd_hist = ta.trend.MACD(close=df['close']).macd_diff().iloc[-1]
+            bb_ind = ta.volatility.BollingerBands(close=df['close'])
+            bb_high = bb_ind.bollinger_hband().iloc[-1]
+            bb_low = bb_ind.bollinger_lband().iloc[-1]
+            atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
+                                                 window=14).average_true_range().iloc[-1]
+
+            prev, curr = df.iloc[-2], df.iloc[-1]
+            is_doji = abs(curr['close'] - curr['open']) <= (curr['high'] - curr['low']) * 0.1
+            is_bull_engulf = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
+                        curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
+            is_bear_engulf = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
+                        curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
+
+            pattern = "Doji" if is_doji else "Бычье поглощение" if is_bull_engulf else "Медвежье поглощение" if is_bear_engulf else "Нет явного паттерна"
+
+            return {
+                "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
+                "macd_hist": round(macd_hist, 6), "bb_high": round(bb_high, 4), "bb_low": round(bb_low, 4),
+                "atr": round(atr, 4), "pattern": pattern
+            }
+        except Exception:
+            return {"rsi": 50.0, "macd_hist": 0, "bb_high": 0, "bb_low": 0, "atr": 0, "pattern": "Нет данных"}
 
     def run(self):
         print("=" * 50)
-        print("СИСТЕМА: ГЛОБАЛЬНЫЙ AI-СКАНЕР ЗАПУЩЕН (УРОВЕНЬ 1: ТРЕНД И ВОЛАТИЛЬНОСТЬ)")
+        print("СИСТЕМА: ДВОЙНОЙ ГЛОБАЛЬНЫЙ СКАНЕР (КРИПТА + MOEX) ЗАПУЩЕН")
         print("=" * 50)
 
         while True:
-            top_crypto = self.get_top_volatile_crypto(limit=3)
+            # Собираем сливки с обоих рынков
+            targets = self.get_top_volatile_crypto(limit=2) + self.get_top_volatile_stocks(limit=2)
 
-            for asset in top_crypto:
+            for asset in targets:
                 symbol = asset['symbol']
                 price = asset['price']
                 change = asset['change']
+                market = asset['market']
 
-                # Получаем полный пак индикаторов
-                inds = self.get_technical_indicators(symbol)
+                # 1. Авто-выход (Трейлинг-стопы)
+                self.portfolio.monitor_positions(symbol, price, self.notifier)
 
-                state_desc = f"Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}. Индикаторы собраны."
+                # 2. Сбор индикаторов
+                inds = self.get_technical_indicators(symbol, market=market)
+                if not inds: continue
+
+                # Маркируем рынок для интерфейса [CRYPTO] или [MOEX]
+                m_tag = "[CRYPTO]" if market == "crypto" else "[MOEX]"
+                state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}. Индикаторы собраны."
+
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] РАДАР: {symbol} | RSI: {inds['rsi']} | MACD_H: {inds['macd_hist']} | ATR: {inds['atr']}")
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | MACD_H: {inds['macd_hist']} | Паттерн: {inds['pattern']}")
 
-                # Отдаем ИИ цену, объем и ВЕСЬ пак индикаторов
                 decision = self.ai.analyze_market_state(symbol, price, asset['volume'], inds)
-
                 decision['market_change'] = round(change, 2)
                 decision['current_price'] = price
 
@@ -144,12 +166,16 @@ class GlobalScanner:
                         decision['action'] = f"HOLD (Blocked: {action})"
                         decision['reason'] = rm_reason
                     else:
-                        trade_ok = self.portfolio.execute_paper_trade(symbol, action, price)
+                        tp, sl = decision.get('take_profit', 0.0), decision.get('stop_loss', 0.0)
+                        trade_ok = self.portfolio.execute_paper_trade(symbol, action, price, tp=tp, sl=sl,
+                                                                      reason=decision.get('reason', 'AI Signal'))
                         if trade_ok:
                             print(
                                 f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена!")
+                            self.notifier.send_signal(symbol, action, price, decision.get('reason', 'Сигнал ИИ'),
+                                                      change, tp, sl)
                         else:
-                            decision['action'] = f"HOLD (No Funds for {action})"
+                            decision['action'] = f"HOLD (No Funds)"
 
                 conn = get_connection()
                 cursor = conn.cursor()
