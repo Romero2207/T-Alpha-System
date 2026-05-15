@@ -18,12 +18,12 @@ from core.notifier import TelegramNotifier
 
 class GlobalScanner:
     def __init__(self):
+        init_db()  # <-- ВОТ ЭТО ДОЛЖНО БЫТЬ ПЕРВЫМ! Сначала строим базу.
         self.ai = AIEngine()
         self.risk_manager = RiskManager()
-        self.portfolio = PortfolioManager()
+        self.portfolio = PortfolioManager() # Теперь кошелек найдет таблицу
         self.notifier = TelegramNotifier()
         self.bybit = HTTP(testnet=False)
-        init_db()
 
     def get_top_volatile_crypto(self, limit=2):
         """Сканирует Bybit на аномалии"""
