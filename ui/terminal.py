@@ -37,7 +37,6 @@ st.markdown("""
 st.sidebar.title("⚙️ Настройки ИИ")
 config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ai_config.json")
 
-# Безопасное чтение
 config = {"risk_profile": "Medium"}
 try:
     if os.path.exists(config_path):
@@ -53,7 +52,6 @@ selected_risk = st.sidebar.radio(
     index=risk_idx
 )
 
-# Безопасная запись (игнорируем ошибку блокировки файла Windows)
 new_risk = "Low" if "🟢" in selected_risk else "Medium"
 if new_risk != config.get("risk_profile"):
     try:
@@ -61,7 +59,7 @@ if new_risk != config.get("risk_profile"):
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f)
     except Exception:
-        pass  # Игнорируем краш
+        pass
 st.sidebar.markdown("---")
 
 
@@ -73,9 +71,7 @@ def render_tradingview_widget(symbol, is_crypto, tf_display):
 
     iframe_url = f"https://s.tradingview.com/widgetembed/?frameElementId=tv_chart_{symbol}&symbol={tv_symbol}&interval={interval}&hidesidetoolbar=0&symboledit=1&saveimage=1&toolbarbg=f1f3f6&studies=%5B%5D&theme=dark&style=1&timezone=Europe%2FMoscow"
 
-    html = f"""
-    <iframe src="{iframe_url}" width="100%" height="600px" frameborder="0" allowtransparency="true" scrolling="no" allowfullscreen></iframe>
-    """
+    html = f'<iframe src="{iframe_url}" width="100%" height="600px" frameborder="0" allowtransparency="true" scrolling="no" allowfullscreen></iframe>'
     components.html(html, height=605, scrolling=False)
 
 
@@ -218,12 +214,15 @@ with tab_terminal:
         st.markdown("##### 🔍 РЕНТГЕН АКТИВА (LIVE)")
 
         if not df_chart.empty and len(df_chart) > 15:
-            close_s, high_s, low_s = df_chart['close'], df_chart['high'], df_chart['low']
+            close_s = df_chart['close']
+            high_s = df_chart['high']
+            low_s = df_chart['low']
+
             rsi = ta.momentum.RSIIndicator(close_s, window=14).rsi().iloc[-1]
             macd = ta.trend.MACD(close_s).macd_diff().iloc[-1]
-            atr = \
-            ta.volatility.AverageTrueRange(high=high_s, low=low_s, close=close_s, window=14).average_true_range().iloc[
-                -1]
+
+            atr_ind = ta.volatility.AverageTrueRange(high=high_s, low=low_s, close=close_s, window=14)
+            atr = atr_ind.average_true_range().iloc[-1]
 
             rsi_color = "#0ECB81" if rsi < 35 else "#F6465D" if rsi > 65 else "#848E9C"
             macd_color = "#0ECB81" if macd > 0 else "#F6465D"
@@ -232,7 +231,9 @@ with tab_terminal:
             st.markdown(f"**MACD (Тренд):** <span style='color:{macd_color}'>{macd:.4f}</span>", unsafe_allow_html=True)
             st.markdown(f"**ATR (Волатильность):** {fiat_sign}{atr:.2f}")
 
-            prev, curr = df_chart.iloc[-2], df_chart.iloc[-1]
+            prev = df_chart.iloc[-2]
+            curr = df_chart.iloc[-1]
+
             is_bull = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
                         curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
             is_bear = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
@@ -242,7 +243,112 @@ with tab_terminal:
             st.markdown(f"**Паттерн:** {pat_text}")
 
             st.markdown("<hr style='margin: 10px 0; border-color: #2B3139;'>", unsafe_allow_html=True)
+
             if rsi < 35 and macd > 0:
-                st.success("Вердикт: ПОКУПКА")
+                st.success("Вердикт: СИЛЬНАЯ ПОКУПКА")
             elif rsi > 65 and macd < 0:
-                st.error("Вердикт:
+                st.error("Вердикт: СИЛЬНАЯ ПРОДАЖА")
+            else:
+                st.info("Вердикт: НЕЙТРАЛЬНО")
+        else:
+            st.write("Сбор данных...")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+with tab_ai_screener:
+    st.header("🌐 ГЛОБАЛЬНЫЙ СКАНЕР РЫНКА (АВТОПИЛОТ)")
+    col_upd, _ = st.columns([1, 5])
+    if col_upd.button("🔄 Обновить радар"): st.rerun()
+
+    sub_crypto, sub_stocks = st.tabs(["🪙 РАДАР BYBIT (24/7)", "🏛️ РАДАР MOEX (Фонда)"])
+    conn = get_connection()
+    df_signals = pd.read_sql_query(
+        "SELECT timestamp, market_state, ai_decision FROM experience_replay WHERE market_state LIKE '%Аномалия:%' ORDER BY id DESC LIMIT 40",
+        conn)
+    conn.close()
+
+
+    def render_signal_card(row, sym):
+        try:
+            dec = json.loads(row['ai_decision'])
+            action = dec.get("action", "HOLD")
+            conf = dec.get("confidence", 0)
+            reason = dec.get("reason", "")
+            price = dec.get("current_price", 0.0)
+            change = dec.get("market_change", 0.0)
+            icon = "🟢" if "BUY" in action and "Blocked" not in action else "🔴" if "SELL" in action and "Blocked" not in action else "⚪"
+
+            with st.expander(f"{icon} {row['timestamp']} | {sym} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
+                st.write(f"**Обоснование ИИ:** {reason}")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Цена", f"{price:,.4f}")
+                m2.metric("Take Profit", f"{dec.get('take_profit', 0.0):,.4f}")
+                m3.metric("Stop Loss", f"{dec.get('stop_loss', 0.0):,.4f}")
+        except:
+            pass
+
+
+    with sub_crypto:
+        crypto_signals = df_signals[df_signals['market_state'].str.contains(r'\[CRYPTO\]')]
+        if not crypto_signals.empty:
+            for _, row in crypto_signals.iterrows():
+                render_signal_card(row, row['market_state'].split("Аномалия: ")[1].split(".")[0])
+        else:
+            st.info("Радар Bybit собирает данные...")
+
+    with sub_stocks:
+        stock_signals = df_signals[df_signals['market_state'].str.contains(r'\[MOEX\]')]
+        if not stock_signals.empty:
+            for _, row in stock_signals.iterrows():
+                render_signal_card(row, row['market_state'].split("Аномалия: ")[1].split(".")[0])
+        else:
+            st.info("Радар MOEX собирает данные...")
+
+with tab_stats:
+    st.header("👤 ПРОФИЛЬ ИНВЕСТОРА T-ALPHA")
+    conn = get_connection()
+    df_port = pd.read_sql_query("SELECT symbol, amount FROM portfolio WHERE amount > 0", conn)
+    df_hist = pd.read_sql_query(
+        "SELECT timestamp, symbol, action, price, amount, total_value, reason FROM trade_history ORDER BY id DESC",
+        conn)
+    conn.close()
+
+    total_turnover = df_hist['total_value'].sum() if not df_hist.empty else 0.0
+    win_count = 0
+    total_closed = 0
+
+    if not df_hist.empty:
+        sells = df_hist[df_hist['action'].str.contains('SELL')]
+        for _, sell in sells.iterrows():
+            total_closed += 1
+            if "Отк" in sell['reason'] or "🎯" in sell['reason']:
+                win_count += 1
+
+    winrate = (win_count / total_closed * 100) if total_closed > 0 else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Оборот", f"${total_turnover:,.2f}")
+    m2.metric("Сделок закрыто", total_closed)
+    m3.metric("Winrate", f"{winrate:.1f}%")
+    m4.metric("Активных позиций", len(df_port))
+
+    st.markdown("---")
+    col_charts, col_info = st.columns([2, 1])
+
+    with col_charts:
+        st.subheader("📊 История операций")
+        if not df_hist.empty:
+            st.line_chart(df_hist.set_index('timestamp')['total_value'])
+        else:
+            st.info("Здесь появится график после первых сделок.")
+
+    with col_info:
+        st.subheader("📦 Ваши активы")
+        if not df_port.empty:
+            for _, asset in df_port.iterrows():
+                if asset['symbol'] not in ['USDT', 'RUB']:
+                    st.write(f"**{asset['symbol']}**: {asset['amount']:.4f} шт.")
+        else:
+            st.write("Портфель пуст")
+
+    st.subheader("📜 Журнал")
+    st.dataframe(df_hist, width='stretch', hide_index=True)
