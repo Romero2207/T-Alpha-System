@@ -31,7 +31,36 @@ st.markdown("""
     .stButton>button { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
+# --- БЛОК УПРАВЛЕНИЯ РИСКОМ (БОКОВОЕ МЕНЮ) ---
+st.sidebar.title("⚙️ Настройки ИИ")
+st.sidebar.markdown("Здесь вы можете изменить поведение сканера.")
 
+# Путь к файлу настроек
+config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
+
+# Загружаем текущие настройки
+try:
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+except FileNotFoundError:
+    config = {"risk_profile": "Medium"}
+
+# Выбор профиля
+risk_idx = 0 if config.get("risk_profile") == "Low" else 1
+selected_risk = st.sidebar.radio(
+    "Профиль Риска:",
+    ["🟢 Низкий (Голубые фишки + Тренд)", "🟡 Средний (Топ-30 + Свинг)"],
+    index=risk_idx
+)
+
+# Сохраняем, если изменили
+new_risk = "Low" if "🟢" in selected_risk else "Medium"
+if new_risk != config.get("risk_profile"):
+    config["risk_profile"] = new_risk
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f)
+    st.sidebar.success("Профиль успешно обновлен!")
+st.sidebar.markdown("---")
 
 # --- ФУНКЦИЯ ДЛЯ ВСТРОЕННОГО TRADINGVIEW (НОВЫЙ ДВИЖОК) ---
 def render_tradingview_widget(symbol, is_crypto, tf_display):
