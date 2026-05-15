@@ -2,17 +2,16 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import streamlit.components.v1 as components
 import sys
 import os
 import json
 import requests
+import ta  # <-- Добавили библиотеку теханализа для UI
 from pybit.unified_trading import HTTP
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection
-from engine.portfolio_manager import PortfolioManager
-
-portfolio = PortfolioManager()
 
 st.set_page_config(page_title="T-Alpha Pro Terminal", layout="wide", initial_sidebar_state="collapsed")
 
@@ -24,46 +23,81 @@ st.markdown("""
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; font-size: 16px; font-weight: 600; color: #848E9C; }
     .stTabs [aria-selected="true"] { color: #F3BA2F !important; border-bottom: 2px solid #F3BA2F !important; }
     .trade-panel { background-color: #161A25; border: 1px solid #2B3139; border-radius: 4px; padding: 15px; }
+    .xray-panel { background: linear-gradient(180deg, #161A25 0%, #0B0E14 100%); border: 1px solid #2B3139; border-radius: 4px; padding: 15px; }
     .log-card { background-color: #161A25; border-left: 3px solid #2B3139; padding: 10px; margin-bottom: 8px; font-family: monospace; font-size: 12px;}
     .buy-text { color: #0ECB81 !important; font-weight: bold;}
     .sell-text { color: #F6465D !important; font-weight: bold;}
     div[data-testid="metric-container"] { padding: 5px 0px; }
-    .stButton>button { width: 100%; } /* Убрали параметр из питона, перенесли в CSS для кнопок */
+    .stButton>button { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
 
 
+# --- ФУНКЦИЯ ДЛЯ ВСТРОЕННОГО TRADINGVIEW (НОВЫЙ ДВИЖОК) ---
+def render_tradingview_widget(symbol, is_crypto, tf_display):
+    tv_symbol = f"BINANCE:{symbol}" if is_crypto else f"MOEX:{symbol}"
+
+    # Конвертируем наш таймфрейм в формат TradingView
+    tv_tf_map = {"1 Минута": "1", "5 Минут": "5", "15 Минут": "15", "1 Час": "60", "1 День": "D"}
+    interval = tv_tf_map.get(tf_display, "15")
+
+    html = f"""
+    <div class="tradingview-widget-container" style="height:100%;width:100%">
+      <div class="tradingview-widget-container__widget" style="height:calc(100% - 32px);width:100%"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+      {{
+      "autosize": true,
+      "symbol": "{tv_symbol}",
+      "interval": "{interval}",
+      "timezone": "Europe/Moscow",
+      "theme": "dark",
+      "style": "1",
+      "locale": "ru",
+      "enable_publishing": false,
+      "backgroundColor": "#0B0E14",
+      "gridColor": "#1F242F",
+      "hide_top_toolbar": false,
+      "hide_legend": false,
+      "save_image": false,
+      "allow_symbol_change": false,
+      "calendar": false,
+      "support_host": "https://www.tradingview.com"
+    }}
+      </script>
+    </div>
+    """
+    components.html(html, height=600)
+
+
 @st.cache_data(ttl=60)
-def fetch_live_chart(symbol, market_type):
-    """Качает 15-минутные свечи для плотного и красивого графика"""
+def fetch_live_chart(symbol, market_type, tf_crypto='15', tf_moex='10'):
     df = pd.DataFrame()
     try:
         if market_type == "crypto":
             client = HTTP(testnet=False)
-            # Изменили интервал на 15 минут, лимит 500 (~5 дней истории)
-            res = client.get_kline(category="linear", symbol=symbol, interval=15, limit=500)
+            res = client.get_kline(category="linear", symbol=symbol, interval=tf_crypto, limit=200)
             if res['retCode'] == 0:
                 klines = res['result']['list']
                 df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
                 df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
-            else:
-                # Мосбиржа: запрашиваем данные ТОЛЬКО за последние 14 дней, чтобы не улететь в 2011 год
-                from datetime import datetime, timedelta
-                start_date = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
-                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=10&from={start_date}"
-                res = requests.get(url, timeout=5).json()
-                candles = res['candles']['data']
-                cols = res['candles']['columns']
-                df = pd.DataFrame(candles, columns=cols)
-                df = df.rename(columns={'end': 'timestamp'})
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+        else:
+            from datetime import datetime, timedelta
+            days_back = 30 if tf_moex in ['60', '24'] else 4
+            start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval={tf_moex}&from={start_date}"
+            res = requests.get(url, timeout=5).json()
+            candles = res['candles']['data']
+            cols = res['candles']['columns']
+            df = pd.DataFrame(candles, columns=cols)
+            df = df.rename(columns={'end': 'timestamp'})
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
 
         if not df.empty:
             df[['open', 'high', 'low', 'close', 'volume']] = df[['open', 'high', 'low', 'close', 'volume']].astype(
                 float)
             df = df.sort_values('timestamp')
     except Exception as e:
-        print(f"Ошибка загрузки графика: {e}")
+        pass
     return df
 
 
@@ -92,18 +126,15 @@ def load_user_portfolio(fiat_symbol, asset_symbol):
     conn = get_connection()
     f_df = pd.read_sql_query(f"SELECT amount FROM portfolio WHERE symbol='{fiat_symbol}'", conn)
     a_df = pd.read_sql_query(f"SELECT amount, average_entry_price FROM portfolio WHERE symbol='{asset_symbol}'", conn)
-    logs = pd.read_sql_query(
-        f"SELECT timestamp, ai_decision FROM experience_replay WHERE market_state LIKE '%{asset_symbol}%' ORDER BY id DESC LIMIT 15",
-        conn)
     conn.close()
-
     fiat_bal = f_df.iloc[0]['amount'] if not f_df.empty else 0.0
     asset_bal = a_df.iloc[0]['amount'] if not a_df.empty else 0.0
     avg_entry = a_df.iloc[0]['average_entry_price'] if not a_df.empty and 'average_entry_price' in a_df.columns else 0.0
-    return fiat_bal, asset_bal, avg_entry, logs
+    return fiat_bal, asset_bal, avg_entry
 
 
-tab_terminal, tab_ai_screener = st.tabs(["📊 РУЧНОЙ ТЕРМИНАЛ", "🧠 AI-СКРИНЕР (АВТОПИЛОТ)"])
+tab_terminal, tab_ai_screener, tab_stats = st.tabs(
+    ["📊 РУЧНОЙ ТЕРМИНАЛ", "🧠 AI-СКРИНЕР (АВТОПИЛОТ)", "📈 СТАТИСТИКА И ИСТОРИЯ"])
 
 with tab_terminal:
     market_mode = st.radio("Рынок:", ["Криптовалюта (Bybit)", "Фондовый рынок (MOEX)"], horizontal=True,
@@ -116,13 +147,20 @@ with tab_terminal:
     fiat = "USDT" if is_crypto else "RUB"
     fiat_sign = "$" if is_crypto else "₽"
 
-    col_sel, col_p, col_c, col_b, col_a = st.columns([2, 1, 1, 1, 1])
+    col_sel, col_tf, col_p, col_c, col_b, col_a = st.columns([1.5, 1, 1, 1, 1, 1])
     with col_sel:
         symbol = st.selectbox("Инструмент", assets, index=assets.index(default_asset) if default_asset in assets else 0,
                               label_visibility="collapsed")
+    with col_tf:
+        tf_display = st.selectbox("Таймфрейм", ["1 Минута", "5 Минут", "15 Минут", "1 Час", "1 День"], index=2,
+                                  label_visibility="collapsed")
+        tf_map_crypto = {"1 Минута": "1", "5 Минут": "5", "15 Минут": "15", "1 Час": "60", "1 День": "D"}
+        tf_map_moex = {"1 Минута": "1", "5 Минут": "10", "15 Минут": "10", "1 Час": "60", "1 День": "24"}
+        c_tf = tf_map_crypto[tf_display]
+        m_tf = tf_map_moex[tf_display]
 
-    df_chart = fetch_live_chart(symbol, market_type)
-    fiat_bal, asset_bal, avg_entry, df_logs = load_user_portfolio(fiat, symbol)
+    df_chart = fetch_live_chart(symbol, market_type, tf_crypto=c_tf, tf_moex=m_tf)
+    fiat_bal, asset_bal, avg_entry = load_user_portfolio(fiat, symbol)
 
     if not df_chart.empty:
         current_price = df_chart['close'].iloc[-1]
@@ -144,82 +182,95 @@ with tab_terminal:
     main_col, side_col = st.columns([3, 1])
 
     with main_col:
-        if not df_chart.empty:
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
-            fig.add_trace(go.Candlestick(
-                x=df_chart['timestamp'], open=df_chart['open'], high=df_chart['high'], low=df_chart['low'],
-                close=df_chart['close'],
-                increasing_line_color='#0ECB81', decreasing_line_color='#F6465D', name='Цена'
-            ), row=1, col=1)
+        chart_type = st.radio("Режим графика:", ["Внутренний AI-График (Быстрый)", "TradingView Pro (Рисование)"],
+                              horizontal=True)
 
-            colors = ['#0ECB81' if row['close'] >= row['open'] else '#F6465D' for idx, row in df_chart.iterrows()]
-            fig.add_trace(go.Bar(x=df_chart['timestamp'], y=df_chart['volume'], marker_color=colors, name='Объем'),
-                          row=2, col=1)
+        if chart_type == "TradingView Pro (Рисование)":
+            # ДОБАВИЛ ПЕРЕДАЧУ ТАЙМФРЕЙМА: tf_display
+            render_tradingview_widget(symbol, is_crypto, tf_display)
+        else:
+            if not df_chart.empty:
+                # ... дальше идет старый код Plotly-графика без изменений ...
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.8, 0.2])
+                fig.add_trace(go.Candlestick(
+                    x=df_chart['timestamp'], open=df_chart['open'], high=df_chart['high'], low=df_chart['low'],
+                    close=df_chart['close'],
+                    increasing_line_color='#0ECB81', decreasing_line_color='#F6465D', name='Цена'
+                ), row=1, col=1)
 
-            fig.update_layout(
-                height=600, margin=dict(l=0, r=50, t=10, b=0), plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14',
-                xaxis_rangeslider_visible=False, showlegend=False, dragmode='pan'
-            )
+                colors = ['#0ECB81' if row['close'] >= row['open'] else '#F6465D' for idx, row in df_chart.iterrows()]
+                fig.add_trace(go.Bar(x=df_chart['timestamp'], y=df_chart['volume'], marker_color=colors, name='Объем'),
+                              row=2, col=1)
 
-            # Настройка осей и схлопывание дыр для Фондового рынка
-            fig.update_yaxes(showgrid=True, gridcolor='#1F242F', side="right", row=1)
-            fig.update_yaxes(showgrid=False, showticklabels=False, row=2)
+                fig.update_layout(
+                    height=600, margin=dict(l=0, r=50, t=10, b=0), plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14',
+                    xaxis_rangeslider_visible=False, showlegend=False, dragmode='pan'
+                )
+                fig.update_yaxes(showgrid=True, gridcolor='#1F242F', side="right", row=1)
+                fig.update_yaxes(showgrid=False, showticklabels=False, row=2)
 
-            if market_type == "stocks":
-                # Скрываем нерабочие часы Мосбиржи (с 19:00 до 10:00) и выходные (Суббота-Воскресенье)
-                hide_breaks = [
-                    dict(bounds=["sat", "mon"]),
-                    dict(bounds=[19, 10], pattern="hour")
-                ]
-                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=1)
-                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=2)
+                if market_type == "stocks":
+                    hide_breaks = [dict(bounds=["sat", "mon"]), dict(bounds=[19, 10], pattern="hour")]
+                    fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=1)
+                    fig.update_xaxes(showgrid=True, gridcolor='#1F242F', rangebreaks=hide_breaks, row=2)
+                else:
+                    fig.update_xaxes(showgrid=True, gridcolor='#1F242F', row=2)
+
+                st.plotly_chart(fig, config={'scrollZoom': True, 'displayModeBar': False})
             else:
-                fig.update_xaxes(showgrid=True, gridcolor='#1F242F', row=2)
-
-            # Избавились от желтых ошибок use_container_width
-            st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False})
-        else:
-            st.warning("Ожидание данных от API биржи...")
-
-        st.markdown("#### ОТКРЫТЫЕ ПОЗИЦИИ")
-        if asset_bal > 0:
-            unrealized_pnl = (current_price - avg_entry) * asset_bal
-            pnl_pct = ((current_price - avg_entry) / avg_entry) * 100 if avg_entry > 0 else 0
-            pnl_color = "#0ECB81" if unrealized_pnl >= 0 else "#F6465D"
-            pnl_sign = "+" if unrealized_pnl >= 0 else ""
-
-            st.markdown(f"""
-            <table style="width:100%; text-align:left; color:#848E9C; border-collapse: collapse;">
-                <tr style="border-bottom: 1px solid #2B3139;"><th>Инструмент</th><th>Кол-во</th><th>Цена входа</th><th>Текущая цена</th><th>Нереализованный PnL</th></tr>
-                <tr>
-                    <td style="padding: 10px; color:#EAECEF; font-weight:bold;">{symbol}</td>
-                    <td style="color:#EAECEF;">{asset_bal:.4f}</td>
-                    <td>{fiat_sign}{avg_entry:,.2f}</td><td>{fiat_sign}{current_price:,.2f}</td>
-                    <td style="color:{pnl_color}; font-weight:bold;">{pnl_sign}{fiat_sign}{unrealized_pnl:,.2f} ({pnl_sign}{pnl_pct:.2f}%)</td>
-                </tr>
-            </table>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown("<div style='color:#848E9C;'>Нет активных позиций.</div>", unsafe_allow_html=True)
+                st.warning("Ожидание данных от API биржи...")
 
     with side_col:
-        st.markdown("<div class='trade-panel'>", unsafe_allow_html=True)
-        st.markdown("##### РУЧНОЙ ОРДЕР (MARKET)")
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("🟢 BUY", key="buy_btn"):
-                portfolio.execute_paper_trade(symbol, "BUY", current_price)
-                st.rerun()
-        with b2:
-            if st.button("🔴 SELL", key="sell_btn"):
-                portfolio.execute_paper_trade(symbol, "SELL", current_price)
-                st.rerun()
+        # --- НОВЫЙ БЛОК: РЕНТГЕН АКТИВА (Вместо ручного ордера) ---
+        st.markdown("<div class='xray-panel'>", unsafe_allow_html=True)
+        st.markdown("##### 🔍 РЕНТГЕН АКТИВА (LIVE)")
+
+        if not df_chart.empty and len(df_chart) > 15:
+            # Быстрый расчет ТА прямо в UI
+            close_s = df_chart['close']
+            high_s = df_chart['high']
+            low_s = df_chart['low']
+
+            rsi = ta.momentum.RSIIndicator(close_s, window=14).rsi().iloc[-1]
+            macd = ta.trend.MACD(close_s).macd_diff().iloc[-1]
+            atr = \
+            ta.volatility.AverageTrueRange(high=high_s, low=low_s, close=close_s, window=14).average_true_range().iloc[
+                -1]
+
+            rsi_color = "#0ECB81" if rsi < 35 else "#F6465D" if rsi > 65 else "#848E9C"
+            macd_color = "#0ECB81" if macd > 0 else "#F6465D"
+
+            st.markdown(f"**RSI (Перегрев):** <span style='color:{rsi_color}'>{rsi:.2f}</span>", unsafe_allow_html=True)
+            st.markdown(f"**MACD (Тренд):** <span style='color:{macd_color}'>{macd:.4f}</span>", unsafe_allow_html=True)
+            st.markdown(f"**ATR (Волатильность):** {fiat_sign}{atr:.2f}")
+
+            # Поиск паттерна
+            prev = df_chart.iloc[-2]
+            curr = df_chart.iloc[-1]
+            is_bull_engulf = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
+                        curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
+            is_bear_engulf = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
+                        curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
+
+            pat_text = "Бычье поглощение 🟢" if is_bull_engulf else "Медвежье поглощение 🔴" if is_bear_engulf else "Нет формации ⚪"
+            st.markdown(f"**Паттерн:** {pat_text}")
+
+            st.markdown("<hr style='margin: 10px 0; border-color: #2B3139;'>", unsafe_allow_html=True)
+            if rsi < 35 and macd > 0:
+                st.success("Технический вердикт: СИЛЬНАЯ ПОКУПКА")
+            elif rsi > 65 and macd < 0:
+                st.error("Технический вердикт: СИЛЬНАЯ ПРОДАЖА")
+            else:
+                st.info("Технический вердикт: НЕЙТРАЛЬНО (HOLD)")
+        else:
+            st.write("Сбор данных для анализа...")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
 with tab_ai_screener:
     st.header("🌐 ГЛОБАЛЬНЫЙ СКАНЕР РЫНКА (АВТОПИЛОТ)")
     st.markdown(
-        "<div style='color: #848E9C; margin-bottom: 20px;'>Нейросеть непрерывно сканирует рынок. Бот самостоятельно совершает сделки, если они проходят фильтры Риск-Менеджера.</div>",
+        "<div style='color: #848E9C; margin-bottom: 20px;'>Бот сканирует рынок и самостоятельно совершает виртуальные сделки.</div>",
         unsafe_allow_html=True)
 
     col_upd, _ = st.columns([1, 5])
@@ -229,7 +280,7 @@ with tab_ai_screener:
 
     conn = get_connection()
     df_signals = pd.read_sql_query(
-        "SELECT timestamp, market_state, ai_decision FROM experience_replay WHERE market_state LIKE '%аномалия%' ORDER BY id DESC LIMIT 20",
+        "SELECT timestamp, market_state, ai_decision FROM experience_replay WHERE market_state LIKE '%Аномалия:%' ORDER BY id DESC LIMIT 20",
         conn)
     conn.close()
 
@@ -242,34 +293,54 @@ with tab_ai_screener:
                 reason = dec.get("reason", "Анализ завершен")
                 price = dec.get("current_price", 0.0)
                 change = dec.get("market_change", 0.0)
-                tp = dec.get("take_profit", 0.0)
-                sl = dec.get("stop_loss", 0.0)
 
                 state = row['market_state']
-                symbol = state.split("Актив ")[1].split(".")[0]
+                sym = state.split("Аномалия: ")[1].split(".")[0]
 
                 icon = "🟢" if "BUY" in action and "Blocked" not in action else "🔴" if "SELL" in action and "Blocked" not in action else "⚪"
 
-                with st.expander(
-                        f"{icon} {row['timestamp']} | {symbol} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
+                with st.expander(f"{icon} {row['timestamp']} | {sym} | {action} ({conf}%) | Изменение: {change:+.2f}%"):
                     st.write(f"**Обоснование ИИ:** {reason}")
-
-                    m1, m2, m3, m4 = st.columns(4)
+                    m1, m2, m3 = st.columns(3)
                     m1.metric("Цена входа", f"${price:,.4f}")
-
-                    tp_color = "normal" if tp > price else "off"
-                    m2.metric("Take Profit", f"${tp:,.4f}" if tp > 0 else "N/A",
-                              delta=f"{((tp - price) / price) * 100:.2f}%" if tp > 0 else None, delta_color=tp_color)
-
-                    sl_color = "inverse" if sl < price else "off"
-                    m3.metric("Stop Loss", f"${sl:,.4f}" if sl > 0 else "N/A",
-                              delta=f"{((sl - price) / price) * 100:.2f}%" if sl > 0 else None, delta_color=sl_color)
-
-                    m4.metric("Уверенность", f"{conf}%")
-
-                    if st.button(f"Торговать {symbol} вручную", key=f"force_trade_{index}_{symbol}"):
-                        st.info("Перейдите во вкладку 'Ручной Терминал' для точного исполнения.")
-            except Exception as e:
+                    m2.metric("Take Profit", f"${dec.get('take_profit', 0.0):,.4f}")
+                    m3.metric("Stop Loss", f"${dec.get('stop_loss', 0.0):,.4f}")
+            except:
                 pass
     else:
-        st.info("Радар пока не обнаружил аномалий. Движок data_collector.py анализирует рынок...")
+        st.info("Радар пока не обнаружил аномалий. (Сканер собирает данные, подождите...)")
+
+with tab_stats:
+    st.header("📈 АНАЛИТИКА И ИСТОРИЯ ОРДЕРОВ")
+
+    conn = get_connection()
+    df_port = pd.read_sql_query(
+        "SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0 AND symbol NOT IN ('USDT', 'RUB')",
+        conn)
+    df_hist = pd.read_sql_query(
+        "SELECT timestamp, symbol, action, price, amount, total_value FROM trade_history ORDER BY id DESC", conn)
+    conn.close()
+
+    stat_col1, stat_col2 = st.columns([1, 2])
+
+    with stat_col1:
+        st.subheader("Состав портфеля")
+        if not df_port.empty:
+            fig_pie = go.Figure(data=[go.Pie(
+                labels=df_port['symbol'],
+                values=df_port['amount'] * df_port['average_entry_price'],
+                hole=.4,
+                marker_colors=['#F3BA2F', '#3366FF', '#0ECB81', '#F6465D']
+            )])
+            fig_pie.update_layout(plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14', font=dict(color='#848E9C'),
+                                  margin=dict(l=0, r=0, t=30, b=0))
+            st.plotly_chart(fig_pie)
+        else:
+            st.info("В портфеле пока нет купленных активов.")
+
+    with stat_col2:
+        st.subheader("Журнал ордеров (Автопилот)")
+        if not df_hist.empty:
+            st.dataframe(df_hist, width='stretch', hide_index=True)
+        else:
+            st.info("История сделок пуста. Включите автопилот.")

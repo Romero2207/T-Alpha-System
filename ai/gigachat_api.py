@@ -15,9 +15,7 @@ class AIEngine:
         self.v_db = get_vector_db()
 
     def analyze_market_state(self, symbol, current_price, current_volume, indicators):
-        # indicators - это теперь словарь: rsi, macd_hist, bb_high, bb_low, atr
-
-        current_state = f"Актив {symbol}. Цена: {current_price}. RSI: {indicators['rsi']}. MACD-Гистограмма: {indicators['macd_hist']}. Верх Боллинджера: {indicators['bb_high']}. Низ Боллинджера: {indicators['bb_low']}. ATR: {indicators['atr']}."
+        current_state = f"Актив {symbol}. Цена: {current_price}. RSI: {indicators['rsi']}. MACD-Гист: {indicators['macd_hist']}. ATR: {indicators['atr']}. СВЕЧНОЙ ПАТТЕРН: {indicators['pattern']}."
 
         try:
             similar_patterns = self.v_db.query(query_texts=[current_state], n_results=1)
@@ -34,22 +32,17 @@ class AIEngine:
         Текущее состояние: {current_state}
         Память: {memory_context}
 
-        ШПАРГАЛКА ПО ИНДИКАТОРАМ (Конфлюэнция):
-        1. RSI: >70 (Перекуплен), <30 (Перепродан).
-        2. MACD-Гистограмма: > 0 (Тренд восходящий/бычий), < 0 (Тренд нисходящий/медвежий).
-        3. Bollinger Bands: Цена близка к bb_low - поддержка. Близка к bb_high - сопротивление.
-        4. ATR: Среднее движение цены. Используй его для установки стопов! (Например, Stop Loss = Цена - 1.5 * ATR).
-
-        ПРАВИЛА СДЕЛКИ:
-        - Ищи СОВПАДЕНИЯ. Если RSI < 30 (надо брать), но MACD < 0 (тренд падает), то это риск! Лучше HOLD.
-        - Выдай BUY, если актив перепродан и тренд меняется вверх.
-        - Выдай SELL, если актив перегрет и тренд меняется вниз.
+        ШПАРГАЛКА:
+        1. Паттерн "Бычье поглощение" + RSI < 50 = Сильнейший сигнал BUY.
+        2. Паттерн "Медвежье поглощение" + RSI > 50 = Сильнейший сигнал SELL.
+        3. Паттерн "Doji" = Ситуация неясна, лучше HOLD.
+        4. ATR: Используй для установки стопов (Stop Loss = Цена - 1.5 * ATR для покупок).
 
         Выдай решение в строгом JSON:
         {{
             "action": "BUY" | "SELL" | "HOLD", 
             "confidence": 0-100, 
-            "reason": "кратко на русском, например 'RSI дно, MACD разворот'",
+            "reason": "кратко на русском, с упоминанием паттерна, например 'Бычье поглощение, MACD рост'",
             "take_profit": 0.0,
             "stop_loss": 0.0
         }}

@@ -55,7 +55,7 @@ class GlobalScanner:
             return []
 
     def get_technical_indicators(self, symbol, window=14):
-        """Рассчитывает RSI, MACD, Bollinger Bands и ATR"""
+        """Рассчитывает RSI, MACD, Bollinger Bands, ATR и Свечные паттерны"""
         try:
             res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=window + 30)
             if res['retCode'] == 0:
@@ -65,37 +65,55 @@ class GlobalScanner:
                 for col in ['open', 'high', 'low', 'close']:
                     df[col] = df[col].astype(float)
 
-                # 1. RSI
                 rsi = ta.momentum.RSIIndicator(close=df['close'], window=window).rsi().iloc[-1]
+                macd_hist = ta.trend.MACD(close=df['close']).macd_diff().iloc[-1]
 
-                # 2. MACD
-                macd_ind = ta.trend.MACD(close=df['close'])
-                macd_hist = macd_ind.macd_diff().iloc[-1]  # Гистограмма MACD
-
-                # 3. Bollinger Bands
                 bb_ind = ta.volatility.BollingerBands(close=df['close'])
                 bb_high = bb_ind.bollinger_hband().iloc[-1]
                 bb_low = bb_ind.bollinger_lband().iloc[-1]
 
-                # 4. ATR (Средняя волатильность)
                 atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
                                                      window=14).average_true_range().iloc[-1]
+
+                # --- РАСПОЗНАВАНИЕ СВЕЧНЫХ ПАТТЕРНОВ ---
+                # Берем последнюю закрытую свечу (prev) и текущую (curr)
+                prev = df.iloc[-2]
+                curr = df.iloc[-1]
+
+                # 1. Doji (Крест) - тело свечи меньше 10% от ее длины
+                is_doji = abs(curr['close'] - curr['open']) <= (curr['high'] - curr['low']) * 0.1
+
+                # 2. Бычье поглощение (Bullish Engulfing)
+                is_bull_engulf = (prev['close'] < prev['open']) and \
+                                 (curr['close'] > curr['open']) and \
+                                 (curr['close'] >= prev['open']) and \
+                                 (curr['open'] <= prev['close'])
+
+                # 3. Медвежье поглощение (Bearish Engulfing)
+                is_bear_engulf = (prev['close'] > prev['open']) and \
+                                 (curr['close'] < curr['open']) and \
+                                 (curr['open'] >= prev['close']) and \
+                                 (curr['close'] <= prev['open'])
+
+                pattern = "Doji (Флэт/Неопределенность)" if is_doji else \
+                    "Бычье поглощение (Сильный сигнал ВВЕРХ)" if is_bull_engulf else \
+                        "Медвежье поглощение (Сильный сигнал ВНИЗ)" if is_bear_engulf else "Нет явного паттерна"
 
                 return {
                     "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
                     "macd_hist": round(macd_hist, 6),
                     "bb_high": round(bb_high, 4),
                     "bb_low": round(bb_low, 4),
-                    "atr": round(atr, 4)
+                    "atr": round(atr, 4),
+                    "pattern": pattern
                 }
         except Exception as e:
             pass
-        # Значения по умолчанию при ошибке
-        return {"rsi": 50.0, "macd_hist": 0, "bb_high": 0, "bb_low": 0, "atr": 0}
+        return {"rsi": 50.0, "macd_hist": 0, "bb_high": 0, "bb_low": 0, "atr": 0, "pattern": "Нет данных"}
 
     def run(self):
         print("=" * 50)
-        print("🚀 СИСТЕМА: ГЛОБАЛЬНЫЙ AI-СКАНЕР ЗАПУЩЕН (УРОВЕНЬ 1: ТРЕНД И ВОЛАТИЛЬНОСТЬ)")
+        print("СИСТЕМА: ГЛОБАЛЬНЫЙ AI-СКАНЕР ЗАПУЩЕН (УРОВЕНЬ 1: ТРЕНД И ВОЛАТИЛЬНОСТЬ)")
         print("=" * 50)
 
         while True:
