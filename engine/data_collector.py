@@ -24,8 +24,6 @@ class GlobalScanner:
         self.portfolio = PortfolioManager()
         self.notifier = TelegramNotifier()
         self.bybit = HTTP(testnet=False)
-
-        # ВОТ ТА САМАЯ СТРОЧКА С ПРАВИЛЬНЫМ СКРЫТЫМ ФАЙЛОМ КОНФИГА:
         self.config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ai_config.json")
 
         # Списки "Голубых фишек" для Низкого риска
@@ -36,7 +34,7 @@ class GlobalScanner:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f).get("risk_profile", "Medium")
-        except FileNotFoundError:
+        except Exception:
             return "Medium"
 
     def get_sma_200(self, symbol, market="crypto"):
