@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import os
 
@@ -24,40 +25,52 @@ class PortfolioManager:
         conn.commit()
         conn.close()
 
-    def monitor_positions(self, symbol, current_price, notifier=None):
-        """Проверяет TP, SL и Трейлинг-стоп для активных позиций"""
+    def monitor_positions(self, symbol, current_price, atr=0.0, notifier=None):
+        """Проверяет TP, SL и адаптивный ATR Трейлинг-стоп для active позиций"""
         conn = get_connection()
+        conn.row_factory = sqlite3.Row if hasattr(get_connection(), 'row_factory') else None
         cursor = conn.cursor()
 
-        # Проверяем, есть ли нужные колонки (защита от старой БД)
         try:
             cursor.execute(
                 "SELECT amount, average_entry_price, take_profit, stop_loss, high_water_mark FROM portfolio WHERE symbol=?",
                 (symbol,))
             row = cursor.fetchone()
-        except Exception as e:
+        except Exception:
             conn.close()
             return False
 
-        if not row or row['amount'] <= 0:
+        if not row:
             conn.close()
             return False
 
-        amt = row['amount']
-        entry = row['average_entry_price']
-        tp = row['take_profit']
-        sl = row['stop_loss']
-        hwm = row['high_water_mark']
+        try:
+            amt = row['amount']
+            entry = row['average_entry_price']
+            tp = row['take_profit']
+            sl = row['stop_loss']
+            hwm = row['high_water_mark']
+        except TypeError:
+            amt, entry, tp, sl, hwm = row[0], row[1], row[2], row[3], row[4]
 
-        # 1. Обновляем Пик цены (High Water Mark)
+        if amt <= 0:
+            conn.close()
+            return False
+
+        # 1. Обновляем Пик цены (High Water Mark) для расчета трейлинга
         if current_price > hwm:
             cursor.execute("UPDATE portfolio SET high_water_mark=? WHERE symbol=?", (current_price, symbol))
             conn.commit()
             hwm = current_price
 
-        # 2. Логика Трейлинг-стопа (Динамический выход)
-        trailing_drop_pct = 1.5
-        trailing_stop_price = hwm * (1 - (trailing_drop_pct / 100))
+        # 2. Логика Трейлинг-стопа на основе волатильности (ATR)
+        if atr > 0:
+            trailing_stop_price = hwm - (atr * 2.0)
+            reason_tag = f"откат на 2xATR от пика"
+        else:
+            trailing_drop_pct = 1.5
+            trailing_stop_price = hwm * (1 - (trailing_drop_pct / 100))
+            reason_tag = f"откат на {trailing_drop_pct}% от пика"
 
         sell_reason = None
         if tp > 0 and current_price >= tp:
@@ -65,11 +78,11 @@ class PortfolioManager:
         elif sl > 0 and current_price <= sl:
             sell_reason = f"🛡 Сработал Stop Loss ({((current_price - entry) / entry) * 100:.2f}%)"
         elif current_price <= trailing_stop_price and hwm > entry * 1.01:
-            sell_reason = f"📉 Трейлинг-стоп: Откат {trailing_drop_pct}% от пика (+{((current_price - entry) / entry) * 100:.2f}%)"
+            sell_reason = f"📉 ATR Трейлинг-стоп: {reason_tag} (+{((current_price - entry) / entry) * 100:.2f}%)"
 
         conn.close()
 
-        # Выполняем авто-продажу
+        # Выполняем авто-выход из позиции
         if sell_reason:
             self.execute_paper_trade(symbol, "SELL", current_price, reason=sell_reason)
             if notifier:
@@ -81,11 +94,13 @@ class PortfolioManager:
         conn = get_connection()
         cursor = conn.cursor()
 
-        fiat_symbol = "RUB" if symbol in ["SBER", "GAZP", "LKOH", "YNDX", "TCSG", "TATN", "AQUA"] else "USDT"
+        fiat_symbol = "RUB" if symbol in ["SBER", "GAZP", "LKOH", "YNDX", "TCSG", "TATN", "AQUA", "ROSN",
+                                          "NVTK"] else "USDT"
         trade_size_fiat = 10000.0 if fiat_symbol == "RUB" else 1000.0
 
         cursor.execute("SELECT amount FROM portfolio WHERE symbol=?", (fiat_symbol,))
-        fiat_balance = cursor.fetchone()[0]
+        fiat_row = cursor.fetchone()
+        fiat_balance = fiat_row[0] if fiat_row else 0.0
 
         cursor.execute("SELECT amount, average_entry_price FROM portfolio WHERE symbol=?", (symbol,))
         asset_row = cursor.fetchone()
@@ -104,7 +119,6 @@ class PortfolioManager:
 
             cursor.execute("UPDATE portfolio SET amount=? WHERE symbol=?", (new_fiat, fiat_symbol))
 
-            # ВАЖНО: Записываем tp, sl и hwm
             if asset_row:
                 cursor.execute(
                     "UPDATE portfolio SET amount=?, average_entry_price=?, take_profit=?, stop_loss=?, high_water_mark=? WHERE symbol=?",
@@ -121,7 +135,6 @@ class PortfolioManager:
             new_fiat = fiat_balance + gained_fiat
 
             cursor.execute("UPDATE portfolio SET amount=? WHERE symbol=?", (new_fiat, fiat_symbol))
-            # При продаже обнуляем стопы
             cursor.execute(
                 "UPDATE portfolio SET amount=0, average_entry_price=0, take_profit=0, stop_loss=0, high_water_mark=0 WHERE symbol=?",
                 (symbol,))

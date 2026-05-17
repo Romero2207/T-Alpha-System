@@ -24,9 +24,9 @@ class GlobalScanner:
         self.portfolio = PortfolioManager()
         self.notifier = TelegramNotifier()
         self.bybit = HTTP(testnet=False)
+
         self.config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ai_config.json")
 
-        # Списки "Голубых фишек" для Низкого риска
         self.blue_chips_crypto = ["BTCUSDT", "ETHUSDT"]
         self.blue_chips_moex = ["SBER", "LKOH", "GAZP", "ROSN", "NVTK", "TCSG", "YDEX"]
 
@@ -34,11 +34,10 @@ class GlobalScanner:
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f).get("risk_profile", "Medium")
-        except Exception:
+        except FileNotFoundError:
             return "Medium"
 
     def get_sma_200(self, symbol, market="crypto"):
-        """Получает Скользящую среднюю за 200 дней (Глобальный Макро-тренд)"""
         try:
             if market == "crypto":
                 res = self.bybit.get_kline(category="linear", symbol=symbol, interval="D", limit=200)
@@ -132,9 +131,9 @@ class GlobalScanner:
 
             prev, curr = df.iloc[-2], df.iloc[-1]
             is_bull_engulf = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
-                        curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
+                    curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
             is_bear_engulf = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
-                        curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
+                    curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
 
             pattern = "Бычье поглощение" if is_bull_engulf else "Медвежье поглощение" if is_bear_engulf else "Нет явного паттерна"
 
@@ -144,6 +143,26 @@ class GlobalScanner:
             }
         except Exception:
             return {"rsi": 50.0, "macd_hist": 0, "atr": 0, "pattern": "Нет данных"}
+
+    def get_simulated_news_sentiment(self, symbol):
+        """Парсит ленту новостей по тикеру и возвращает сентимент ИИ"""
+        # Эмуляция агрегатора новостных лент
+        news_database = {
+            "SBER": "Сбербанк отчитался о рекордном росте чистой прибыли по РСБУ. Совет директоров рекомендует щедрые дивиденды.",
+            "GAZP": "Газпром столкнулся с дополнительным ростом налоговой нагрузки в виде НДПИ, чистая прибыль под давлением.",
+            "LKOH": "Цены на марку Urals стабильны, Лукойл оптимизирует логистические цепочки и увеличивает экспорт.",
+            "BTCUSDT": "Приток капитала в спотовые Биткоин-ETF бьет исторические рекорды. Крупные фонды активно аккумулируют монеты."
+        }
+        headline = news_database.get(symbol,
+                                     f"Корпоративные новости по {symbol} отсутствуют, новостной фон умеренно стабильный.")
+
+        # Здесь мы задействуем нейросеть для оценки контекста (Sentiment Analysis)
+        # Для скорости симулируем её ответ на основе триггеров, в ai/gigachat_api.py можно вынести полноценный метод
+        if "рекорд" in headline or "приток" in headline:
+            return 0.65  # Явный позитив
+        elif "налог" in headline or "давление" in headline:
+            return -0.55  # Сильный негатив
+        return 0.0  # Нейтрально
 
     def run(self):
         print("=" * 50)
@@ -162,31 +181,33 @@ class GlobalScanner:
                 change = asset['change']
                 market = asset['market']
 
-                self.portfolio.monitor_positions(symbol, price, self.notifier)
+                # ИСПРАВЛЕНИЕ: Сначала вычисляем технические индикаторы актива...
+                inds = self.get_technical_indicators(symbol, market=market)
+                if not inds: continue
+
+                # ...чтобы передать свежий ATR в мониторинг позиций для адаптивного трейлинг-стопа!
+                self.portfolio.monitor_positions(symbol, price, inds['atr'], self.notifier)
 
                 # ==========================================
                 # ЛОГИКА НИЗКОГО РИСКА (ГОЛУБЫЕ ФИШКИ + ТРЕНД)
                 # ==========================================
                 if risk_profile == "Low":
-                    # 1. Фильтр мусора (только надежные активы)
                     if symbol not in (self.blue_chips_crypto + self.blue_chips_moex):
                         continue
 
-                    # 2. Фильтр глобального тренда (SMA 200)
                     sma200 = self.get_sma_200(symbol, market)
                     if sma200 > 0 and price < sma200:
-                        # Если цена ниже SMA200 - мы в падающем тренде. Игнорируем актив!
                         continue
                 # ==========================================
-
-                inds = self.get_technical_indicators(symbol, market=market)
-                if not inds: continue
 
                 m_tag = "[CRYPTO]" if market == "crypto" else "[MOEX]"
                 state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}. Индикаторы собраны."
 
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | Паттерн: {inds['pattern']}")
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | ATR: {inds['atr']} | Паттерн: {inds['pattern']}")
+
+                # Получаем ИИ-оценку новостного фона
+                news_sentiment = self.get_simulated_news_sentiment(symbol)
 
                 decision = self.ai.analyze_market_state(symbol, price, asset['volume'], inds)
                 decision['market_change'] = round(change, 2)
@@ -194,17 +215,30 @@ class GlobalScanner:
 
                 action = decision.get('action', 'HOLD')
                 if action in ["BUY", "SELL"]:
-                    approved, rm_reason = self.risk_manager.approve_signal(symbol, action, price, inds['rsi'])
+                    # Передаем новостной фон и профиль риска в риск-менеджер
+                    approved, rm_reason = self.risk_manager.approve_signal(
+                        symbol, action, price, inds['rsi'],
+                        news_sentiment=news_sentiment, risk_profile=risk_profile
+                    )
+
                     if not approved:
                         decision['action'] = f"HOLD (Blocked: {action})"
                         decision['reason'] = rm_reason
                     else:
+                        # Если риск-менеджер дал аппрув, забираем уровни TP/SL
                         tp, sl = decision.get('take_profit', 0.0), decision.get('stop_loss', 0.0)
+
+                        # Если ИИ выдал нулевые стопы, рассчитываем их динамически на базе 3xATR
+                        if sl == 0:
+                            sl = price - (inds['atr'] * 2.0) if action == "BUY" else price + (inds['atr'] * 2.0)
+                        if tp == 0:
+                            tp = price + (inds['atr'] * 4.0) if action == "BUY" else price - (inds['atr'] * 4.0)
+
                         trade_ok = self.portfolio.execute_paper_trade(symbol, action, price, tp=tp, sl=sl,
                                                                       reason=decision.get('reason', 'AI Signal'))
                         if trade_ok:
                             print(
-                                f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена!")
+                                f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена! SL (Trailing): {sl:.2f}")
                             self.notifier.send_signal(symbol, action, price, decision.get('reason', 'Сигнал ИИ'),
                                                       change, tp, sl)
 

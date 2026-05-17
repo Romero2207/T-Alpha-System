@@ -28,12 +28,11 @@ def save_config(risk):
         json.dump({"risk_profile": risk}, f, ensure_ascii=False)
 
 
-# Стилизация под профессиональный темный терминал
+# Стилизация под премиальный темный терминал
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 1rem; padding-left: 1.5rem; padding-right: 1.5rem; max-width: 100%; }
     .stMetric { background-color: #161A25; border: 1px solid #2B3139; padding: 12px; border-radius: 6px; }
-    .xray-panel { background: #161A25; border: 1px solid #F3BA2F; padding: 18px; border-radius: 8px; min-height: 515px; }
     header {visibility: hidden;}
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
     .stTabs [data-baseweb="tab"] { 
@@ -82,7 +81,6 @@ def fetch_hub_candles(symbol, market_mode):
                 for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
                 return df
         else:
-            # Используем дневные свечи (интервал 24) для стабильного расчета SMA200 и RSI фонда
             url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?interval=24&limit=150"
             res = requests.get(url, timeout=5).json()
             if 'candles' in res and res['candles']['data']:
@@ -116,6 +114,18 @@ def load_hub_finances(market_mode):
     return df_history, df_portfolio
 
 
+# Метод отрисовки без устаревших параметров прокрутки
+def render_stable_hub_chart(symbol, market_mode, tf_display):
+    exchange = "BYBIT" if market_mode == "crypto" else "MOEX"
+    tv_symbol = f"{exchange}:{symbol}"
+
+    tf_map = {"15 Минут": "15", "1 Час": "60", "1 День": "D"}
+    interval = tf_map.get(tf_display, "15")
+
+    embed_url = f"https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={interval}&theme=dark&locale=ru"
+    st.iframe(embed_url, height=520)
+
+
 # ЗАГРУЗКА ДАННЫХ
 conf_data = load_config()
 all_crypto = get_crypto_assets_list()
@@ -131,7 +141,7 @@ with hub_crypto:
     term_c, screen_c, stats_c = st.tabs(["📊 ТЕРМИНАЛ", "🧠 AI-СКРИНЕР", "📈 ПОРТФЕЛЬ И СТАТИСТИКА"])
 
     with term_c:
-        col_chart, col_xray = st.columns([3.2, 0.8])
+        col_chart, col_xray = st.columns([3.1, 0.9])
         with col_chart:
             c1, c2 = st.columns([2, 1])
             crypto_symbol = c1.selectbox("Выберите инструмент", all_crypto,
@@ -139,36 +149,28 @@ with hub_crypto:
                                          key="c_sym")
             crypto_tf = c2.selectbox("Таймфрейм графика", ["15 Минут", "1 Час", "1 День"], key="c_tf")
 
-            tf_tv_map = {"15 Минут": "15", "1 Час": "60", "1 День": "D"}
-
-            # Оптимизированный контейнер графика (на всю ширину колонки)
-            st.components.v1.iframe(
-                src=f"https://s.tradingview.com/widgetembed/?symbol=BYBIT:{crypto_symbol}&interval={tf_tv_map[crypto_tf]}&theme=dark&locale=ru",
-                height=520,
-                scrolling=False
-            )
+            render_stable_hub_chart(crypto_symbol, "crypto", crypto_tf)
 
         with col_xray:
-            st.markdown("<div class='xray-panel'>", unsafe_allow_html=True)
-            st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{crypto_symbol}**")
-            candles_df = fetch_hub_candles(crypto_symbol, "crypto")
+            with st.container(border=True):
+                st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{crypto_symbol}**")
+                candles_df = fetch_hub_candles(crypto_symbol, "crypto")
 
-            if not candles_df.empty and len(candles_df) >= 15:
-                live_price = candles_df['c'].iloc[-1]
-                rsi_value = ta.momentum.RSIIndicator(candles_df['c'], window=14).rsi().iloc[-1]
+                if not candles_df.empty and len(candles_df) >= 15:
+                    live_price = candles_df['c'].iloc[-1]
+                    rsi_value = ta.momentum.RSIIndicator(candles_df['c'], window=14).rsi().iloc[-1]
 
-                st.metric("Текущая цена", f"${live_price:,.2f}")
-                st.metric("Мгновенный RSI", f"{rsi_value:.2f}")
+                    st.metric("Текущая цена", f"${live_price:,.2f}")
+                    st.metric("Мгновенный RSI", f"{rsi_value:.2f}")
 
-                if rsi_value < 35:
-                    st.success("Вердикт: ЗОНА ПОКУПКИ 🟢")
-                elif rsi_value > 65:
-                    st.error("Вердикт: ПЕРЕГРЕВ 🔴")
+                    if rsi_value < 35:
+                        st.success("Вердикт: ЗОНА ПОКУПКИ 🟢")
+                    elif rsi_value > 65:
+                        st.error("Вердикт: ПЕРЕГРЕВ 🔴")
+                    else:
+                        st.info("Вердикт: НЕЙТРАЛЬНО ⚪")
                 else:
-                    st.info("Вердикт: НЕЙТРАЛЬНО ⚪")
-            else:
-                st.warning("Ожидание стабильного потока данных...")
-            st.markdown("</div>", unsafe_allow_html=True)
+                    st.warning("Ожидание стабильного потока данных...")
 
     with screen_c:
         st.subheader("🛡️ Управление Рисками ИИ (Крипта)")
@@ -209,7 +211,6 @@ with hub_crypto:
 
     with stats_c:
         h_df, p_df = load_hub_finances("crypto")
-
         free_usdt = p_df[p_df['symbol'] == 'USDT']['amount'].values[0] if not p_df[
             p_df['symbol'] == 'USDT'].empty else 0.0
         active_positions = p_df[p_df['symbol'] != 'USDT']
@@ -222,16 +223,16 @@ with hub_crypto:
         m1.metric("Свободный баланс", f"${free_usdt:,.2f}")
         m2.metric("Чистый Профит (Крипта)", f"${crypto_profit:,.2f}",
                   delta=f"{crypto_profit:+.2f}$" if crypto_profit != 0 else None)
-        m3.metric("Активных позиций", len(active_positions))
+        m3.metric("Active Positions", len(active_positions))
 
         st.markdown("---")
         c_p, c_h = st.columns([1, 2])
         with c_p:
             st.markdown("#### 📦 Купленные токены")
-            st.dataframe(active_positions, hide_index=True, width=400)
+            st.dataframe(active_positions, hide_index=True)
         with c_h:
             st.markdown("#### 📜 Журнал сделок Bybit")
-            st.dataframe(h_df, hide_index=True, width=1000)
+            st.dataframe(h_df, hide_index=True)
 
 # ==============================================================================
 # 🏛️ ФОНДОВЫЙ-ХАБ (MOEX)
@@ -240,44 +241,35 @@ with hub_moex:
     term_m, screen_m, stats_m = st.tabs(["📊 ТЕРМИНАЛ", "🧠 AI-СКРИНЕР", "📈 ПОРТФЕЛЬ И СТАТИСТИКА"])
 
     with term_m:
-        col_chart_m, col_xray_m = st.columns([3.2, 0.8])
+        col_chart_m, col_xray_m = st.columns([3.1, 0.9])
         with col_chart_m:
             c1m, c2m = st.columns([2, 1])
             moex_symbol = c1m.selectbox("Выберите акцию", all_moex,
                                         index=all_moex.index("SBER") if "SBER" in all_moex else 0, key="m_sym")
             moex_tf = c2m.selectbox("Таймфрейм графика", ["15 Минут", "1 Час", "1 День"], key="m_tf")
 
-            # Исправленный маппинг таймфреймов для Московской Биржи (убран ошибочный интервал 10)
-            moex_tf_map = {"15 Минут": "15", "1 Час": "60", "1 День": "D"}
-
-            # Исправленный вызов виджета TradingView для MOEX (Отказоустойчивый эмбед)
-            st.components.v1.iframe(
-                src=f"https://s.tradingview.com/widgetembed/?symbol=MOEX:{moex_symbol}&interval={moex_tf_map[moex_tf]}&theme=dark&locale=ru",
-                height=520,
-                scrolling=False
-            )
+            render_stable_hub_chart(moex_symbol, "stocks", moex_tf)
 
         with col_xray_m:
-            st.markdown("<div class='xray-panel'>", unsafe_allow_html=True)
-            st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{moex_symbol}**")
-            candles_df_m = fetch_hub_candles(moex_symbol, "stocks")
+            with st.container(border=True):
+                st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{moex_symbol}**")
+                candles_df_m = fetch_hub_candles(moex_symbol, "stocks")
 
-            if not candles_df_m.empty and len(candles_df_m) >= 15:
-                live_price_m = candles_df_m['c'].iloc[-1]
-                rsi_value_m = ta.momentum.RSIIndicator(candles_df_m['c'], window=14).rsi().iloc[-1]
+                if not candles_df_m.empty and len(candles_df_m) >= 15:
+                    live_price_m = candles_df_m['c'].iloc[-1]
+                    rsi_value_m = ta.momentum.RSIIndicator(candles_df_m['c'], window=14).rsi().iloc[-1]
 
-                st.metric("Цена акции", f"{live_price_m:,.2f} ₽")
-                st.metric("Мгновенный RSI", f"{rsi_value_m:.2f}")
+                    st.metric("Цена акции", f"{live_price_m:,.2f} ₽")
+                    st.metric("Мгновенный RSI", f"{rsi_value_m:.2f}")
 
-                sma200 = candles_df_m['c'].mean() if len(candles_df_m) < 200 else \
-                candles_df_m['c'].rolling(200).mean().iloc[-1]
-                if live_price_m > sma200:
-                    st.success("UPTREND 📈 (Выше SMA 200)")
+                    sma200 = candles_df_m['c'].mean() if len(candles_df_m) < 200 else \
+                    candles_df_m['c'].rolling(200).mean().iloc[-1]
+                    if live_price_m > sma200:
+                        st.success("UPTREND 📈 (Выше SMA 200)")
+                    else:
+                        st.error("DOWNTREND 📉 (Ниже SMA 200)")
                 else:
-                    st.error("DOWNTREND 📉 (Ниже SMA 200)")
-            else:
-                st.warning("Ожидание стабильного потока данных...")
-            st.markdown("</div>", unsafe_allow_html=True)
+                    st.warning("Ожидание стабильного потока данных...")
 
     with screen_m:
         st.subheader("📡 Лента активности ИИ-Автопилота (Фонда)")
@@ -305,7 +297,6 @@ with hub_moex:
 
     with stats_m:
         h_df_m, p_df_m = load_hub_finances("stocks")
-
         free_rub = p_df_m[p_df_m['symbol'] == 'RUB']['amount'].values[0] if not p_df_m[
             p_df_m['symbol'] == 'RUB'].empty else 0.0
         active_positions_m = p_df_m[(p_df_m['symbol'] != 'RUB') & (p_df_m['symbol'] != 'USDT')]
@@ -324,7 +315,7 @@ with hub_moex:
         c_p_m, c_h_m = st.columns([1, 2])
         with c_p_m:
             st.markdown("#### 📦 Купленные акции")
-            st.dataframe(active_positions_m, hide_index=True, width=400)
+            st.dataframe(active_positions_m, hide_index=True)
         with c_h_m:
             st.markdown("#### 📜 Журнал сделок MOEX")
-            st.dataframe(h_df_m, hide_index=True, width=1000)
+            st.dataframe(h_df_m, hide_index=True)
