@@ -24,17 +24,14 @@ class GlobalScanner:
         self.portfolio = PortfolioManager()
         self.notifier = TelegramNotifier()
         self.bybit = HTTP(testnet=False)
-
         self.config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ai_config.json")
-
-        self.blue_chips_crypto = ["BTCUSDT", "ETHUSDT"]
-        self.blue_chips_moex = ["SBER", "LKOH", "GAZP", "ROSN", "NVTK", "TCSG", "YDEX"]
+        self.blue_chips = ["BTCUSDT", "ETHUSDT", "SBER", "LKOH", "GAZP", "YDEX", "TCSG"]
 
     def get_risk_profile(self):
         try:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 return json.load(f).get("risk_profile", "Medium")
-        except FileNotFoundError:
+        except:
             return "Medium"
 
     def get_sma_200(self, symbol, market="crypto"):
@@ -43,8 +40,7 @@ class GlobalScanner:
                 res = self.bybit.get_kline(category="linear", symbol=symbol, interval="D", limit=200)
                 if res['retCode'] == 0:
                     closes = [float(x[4]) for x in res['result']['list']]
-                    if len(closes) < 50: return 0.0
-                    return sum(closes) / len(closes)
+                    return sum(closes) / len(closes) if len(closes) >= 50 else 0.0
             else:
                 start_date = (datetime.now() - timedelta(days=300)).strftime('%Y-%m-%d')
                 url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=24&from={start_date}"
@@ -52,12 +48,10 @@ class GlobalScanner:
                 data = res['candles']['data']
                 cols = res['candles']['columns']
                 if not data: return 0.0
-
                 idx_close = cols.index('close')
                 closes = [float(row[idx_close]) for row in data if row[idx_close] is not None][-200:]
-                if len(closes) < 50: return 0.0
-                return sum(closes) / len(closes)
-        except Exception:
+                return sum(closes) / len(closes) if len(closes) >= 50 else 0.0
+        except:
             return 0.0
         return 0.0
 
@@ -65,7 +59,6 @@ class GlobalScanner:
         try:
             res = self.bybit.get_tickers(category="linear")
             if res.get('retCode') != 0: return []
-
             tickers = res['result']['list']
             hot = []
             for t in tickers:
@@ -79,7 +72,7 @@ class GlobalScanner:
                                     'market': 'crypto'})
             hot.sort(key=lambda x: abs(x['change']), reverse=True)
             return hot[:limit]
-        except Exception:
+        except:
             return []
 
     def get_top_volatile_stocks(self, limit=3):
@@ -88,26 +81,23 @@ class GlobalScanner:
             res = requests.get(url, timeout=5).json()
             data = res['marketdata']['data']
             cols = res['marketdata']['columns']
-
             idx_secid, idx_last, idx_vol, idx_change = cols.index('SECID'), cols.index('LAST'), cols.index(
                 'VALTODAY'), cols.index('LASTTOPREVPRICE')
-
             hot = []
             for row in data:
                 symbol, price, vol, change = row[idx_secid], row[idx_last], row[idx_vol], row[idx_change]
                 if price and vol and change and vol > 50000000 and abs(change) > 1.5:
                     hot.append({'symbol': symbol, 'price': float(price), 'change': float(change), 'volume': float(vol),
                                 'market': 'stocks'})
-
             hot.sort(key=lambda x: abs(x['change']), reverse=True)
             return hot[:limit]
-        except Exception:
+        except:
             return []
 
-    def get_technical_indicators(self, symbol, market="crypto", window=14):
+    def get_technical_indicators(self, symbol, market="crypto"):
         try:
             if market == "crypto":
-                res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=window + 30)
+                res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=50)
                 if res['retCode'] == 0:
                     klines = res['result']['list']
                     klines.reverse()
@@ -119,103 +109,91 @@ class GlobalScanner:
                 start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
                 url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=10&from={start_date}"
                 res = requests.get(url, timeout=5).json()
+                if not res.get('candles', {}).get('data'): return None
                 df = pd.DataFrame(res['candles']['data'], columns=res['candles']['columns'])
-                if df.empty: return None
 
-            for col in ['open', 'high', 'low', 'close']: df[col] = df[col].astype(float)
+            for col in ['open', 'high', 'low', 'close', 'volume']: df[col] = df[col].astype(float)
 
-            rsi = ta.momentum.RSIIndicator(close=df['close'], window=window).rsi().iloc[-1]
+            rsi = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi().iloc[-1]
             macd_hist = ta.trend.MACD(close=df['close']).macd_diff().iloc[-1]
             atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
                                                  window=14).average_true_range().iloc[-1]
 
             prev, curr = df.iloc[-2], df.iloc[-1]
-            is_bull_engulf = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
-                    curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
-            is_bear_engulf = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
-                    curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
-
-            pattern = "Бычье поглощение" if is_bull_engulf else "Медвежье поглощение" if is_bear_engulf else "Нет явного паттерна"
+            is_bull = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
+                        curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
+            is_bear = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
+                        curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
+            pattern = "Бычье поглощение" if is_bull else "Медвежье поглощение" if is_bear else "Нет явного паттерна"
 
             return {
-                "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0, "macd_hist": round(macd_hist, 6),
-                "atr": round(atr, 4), "pattern": pattern
+                "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
+                "macd_hist": round(macd_hist, 6),
+                "atr": round(atr, 4),
+                "pattern": pattern
             }
-        except Exception:
+        except:
             return {"rsi": 50.0, "macd_hist": 0, "atr": 0, "pattern": "Нет данных"}
 
-    def get_simulated_news_sentiment(self, symbol):
-        """Парсит ленту новостей по тикеру и возвращает сентимент ИИ"""
-        # Эмуляция агрегатора новостных лент
-        news_database = {
-            "SBER": "Сбербанк отчитался о рекордном росте чистой прибыли по РСБУ. Совет директоров рекомендует щедрые дивиденды.",
-            "GAZP": "Газпром столкнулся с дополнительным ростом налоговой нагрузки в виде НДПИ, чистая прибыль под давлением.",
-            "LKOH": "Цены на марку Urals стабильны, Лукойл оптимизирует логистические цепочки и увеличивает экспорт.",
-            "BTCUSDT": "Приток капитала в спотовые Биткоин-ETF бьет исторические рекорды. Крупные фонды активно аккумулируют монеты."
+    def get_simulated_news(self, symbol):
+        news_db = {
+            "SBER": "Сбербанк отчитался о рекордном росте чистой прибыли по РСБУ. Ждем дивиденды.",
+            "GAZP": "Газпром столкнулся с дополнительным ростом налоговой нагрузки в виде НДПИ.",
+            "LKOH": "Лукойл оптимизирует логистические цепочки и увеличивает экспорт.",
+            "BTCUSDT": "Приток капитала в спотовые Биткоин-ETF бьет исторические рекорды."
         }
-        headline = news_database.get(symbol,
-                                     f"Корпоративные новости по {symbol} отсутствуют, новостной фон умеренно стабильный.")
-
-        # Здесь мы задействуем нейросеть для оценки контекста (Sentiment Analysis)
-        # Для скорости симулируем её ответ на основе триггеров, в ai/gigachat_api.py можно вынести полноценный метод
-        if "рекорд" in headline or "приток" in headline:
-            return 0.65  # Явный позитив
-        elif "налог" in headline or "давление" in headline:
-            return -0.55  # Сильный негатив
-        return 0.0  # Нейтрально
+        text = news_db.get(symbol, f"Новостной фон по {symbol} нейтральный.")
+        sentiment = 0.65 if "рекорд" in text or "приток" in text else -0.55 if "налог" in text or "давление" in text else 0.0
+        return text, sentiment
 
     def run(self):
         print("=" * 50)
-        print("СИСТЕМА: ИНТЕЛЛЕКТУАЛЬНЫЙ СКАНЕР С ФИЛЬТРОМ РИСКОВ ЗАПУЩЕН")
+        print("СИСТЕМА: СУПЕР-СКАНЕР T-ALPHA PRO С ИИ-ФИЛЬТРАМИ ЗАПУЩЕН")
         print("=" * 50)
 
         while True:
             risk_profile = self.get_risk_profile()
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Текущий профиль риска: {risk_profile}")
 
+            # ИСПРАВЛЕНИЕ 2: Динамический сбор активов объединяет оба рынка в единый цикл
             targets = self.get_top_volatile_crypto(limit=3) + self.get_top_volatile_stocks(limit=3)
 
             for asset in targets:
-                symbol = asset['symbol']
-                price = asset['price']
-                change = asset['change']
-                market = asset['market']
+                symbol, price, change, vol, market = asset['symbol'], asset['price'], asset['change'], asset['volume'], \
+                asset['market']
 
-                # ИСПРАВЛЕНИЕ: Сначала вычисляем технические индикаторы актива...
                 inds = self.get_technical_indicators(symbol, market=market)
                 if not inds: continue
 
-                # ...чтобы передать свежий ATR в мониторинг позиций для адаптивного трейлинг-стопа!
+                # ИСПРАВЛЕНИЕ 3: Передаем корректную цену актива в трейлинг-стоп
                 self.portfolio.monitor_positions(symbol, price, inds['atr'], self.notifier)
 
-                # ==========================================
-                # ЛОГИКА НИЗКОГО РИСКА (ГОЛУБЫЕ ФИШКИ + ТРЕНД)
-                # ==========================================
+                # Фильтр Low Risk (Взгляд издалека)
+                sma200 = self.get_sma_200(symbol, market)
                 if risk_profile == "Low":
-                    if symbol not in (self.blue_chips_crypto + self.blue_chips_moex):
-                        continue
+                    if symbol not in self.blue_chips: continue
+                    if sma200 > 0 and price < sma200: continue
 
-                    sma200 = self.get_sma_200(symbol, market)
-                    if sma200 > 0 and price < sma200:
-                        continue
-                # ==========================================
+                # ИСПРАВЛЕНИЕ 1: Обогащаем словарь индикаторов новостями и трендом для GigaChat
+                news_text, news_sentiment = self.get_simulated_news(symbol)
+                inds['news_sentiment'] = news_sentiment
+                inds['news_feed'] = news_text
+                inds['sma200'] = round(sma200, 2)
 
                 m_tag = "[CRYPTO]" if market == "crypto" else "[MOEX]"
-                state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}. Индикаторы собраны."
-
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | ATR: {inds['atr']} | Паттерн: {inds['pattern']}")
+                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | Сентимент: {news_sentiment}")
 
-                # Получаем ИИ-оценку новостного фона
-                news_sentiment = self.get_simulated_news_sentiment(symbol)
-
-                decision = self.ai.analyze_market_state(symbol, price, asset['volume'], inds)
+                # Запускаем ИИ Анализ со всеми доступными данными
+                decision = self.ai.analyze_market_state(symbol, price, vol, inds)
                 decision['market_change'] = round(change, 2)
                 decision['current_price'] = price
 
                 action = decision.get('action', 'HOLD')
+                state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}."
+
+                # Риск-Менеджмент и Исполнение
                 if action in ["BUY", "SELL"]:
-                    # Передаем новостной фон и профиль риска в риск-менеджер
                     approved, rm_reason = self.risk_manager.approve_signal(
                         symbol, action, price, inds['rsi'],
                         news_sentiment=news_sentiment, risk_profile=risk_profile
@@ -225,23 +203,21 @@ class GlobalScanner:
                         decision['action'] = f"HOLD (Blocked: {action})"
                         decision['reason'] = rm_reason
                     else:
-                        # Если риск-менеджер дал аппрув, забираем уровни TP/SL
                         tp, sl = decision.get('take_profit', 0.0), decision.get('stop_loss', 0.0)
 
-                        # Если ИИ выдал нулевые стопы, рассчитываем их динамически на базе 3xATR
-                        if sl == 0:
-                            sl = price - (inds['atr'] * 2.0) if action == "BUY" else price + (inds['atr'] * 2.0)
-                        if tp == 0:
-                            tp = price + (inds['atr'] * 4.0) if action == "BUY" else price - (inds['atr'] * 4.0)
+                        # Страховочный расчет стопов по ATR
+                        if sl == 0: sl = price - (inds['atr'] * 2.0) if action == "BUY" else price + (inds['atr'] * 2.0)
+                        if tp == 0: tp = price + (inds['atr'] * 4.0) if action == "BUY" else price - (inds['atr'] * 4.0)
 
                         trade_ok = self.portfolio.execute_paper_trade(symbol, action, price, tp=tp, sl=sl,
                                                                       reason=decision.get('reason', 'AI Signal'))
                         if trade_ok:
                             print(
-                                f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена! SL (Trailing): {sl:.2f}")
+                                f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена!")
                             self.notifier.send_signal(symbol, action, price, decision.get('reason', 'Сигнал ИИ'),
                                                       change, tp, sl)
 
+                # Сохраняем опыт
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute(
