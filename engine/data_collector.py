@@ -119,7 +119,15 @@ class GlobalScanner:
             atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
                                                  window=14).average_true_range().iloc[-1]
 
+            # ИСПРАВЛЕНИЕ: Расчет зон ликвидности (Поддержка и Сопротивление за 50 свечей)
+            local_high = df['high'].max()
+            local_low = df['low'].min()
+
             prev, curr = df.iloc[-2], df.iloc[-1]
+
+            # ИСПРАВЛЕНИЕ: Детектор Гэпа (Разрыв цены между закрытием прошлой и открытием новой свечи)
+            gap_percent = ((curr['open'] - prev['close']) / prev['close']) * 100
+
             is_bull = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
                         curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
             is_bear = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
@@ -130,10 +138,14 @@ class GlobalScanner:
                 "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
                 "macd_hist": round(macd_hist, 6),
                 "atr": round(atr, 4),
+                "local_high": round(local_high, 4),
+                "local_low": round(local_low, 4),
+                "gap_percent": round(gap_percent, 2),
                 "pattern": pattern
             }
         except:
-            return {"rsi": 50.0, "macd_hist": 0, "atr": 0, "pattern": "Нет данных"}
+            return {"rsi": 50.0, "macd_hist": 0, "atr": 0, "local_high": 0, "local_low": 0, "gap_percent": 0.0,
+                    "pattern": "Нет данных"}
 
     def get_simulated_news(self, symbol):
         news_db = {
@@ -148,14 +160,13 @@ class GlobalScanner:
 
     def run(self):
         print("=" * 50)
-        print("СИСТЕМА: СУПЕР-СКАНЕР T-ALPHA PRO С ИИ-ФИЛЬТРАМИ ЗАПУЩЕН")
+        print("СИСТЕМА: ИНТЕЛЛЕКТУАЛЬНЫЙ СКАНЕР С ФИЛЬТРОМ РИСКОВ ЗАПУЩЕН")
         print("=" * 50)
 
         while True:
             risk_profile = self.get_risk_profile()
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Текущий профиль риска: {risk_profile}")
 
-            # ИСПРАВЛЕНИЕ 2: Динамический сбор активов объединяет оба рынка в единый цикл
             targets = self.get_top_volatile_crypto(limit=3) + self.get_top_volatile_stocks(limit=3)
 
             for asset in targets:
@@ -165,26 +176,24 @@ class GlobalScanner:
                 inds = self.get_technical_indicators(symbol, market=market)
                 if not inds: continue
 
-                # ИСПРАВЛЕНИЕ 3: Передаем корректную цену актива в трейлинг-стоп
                 self.portfolio.monitor_positions(symbol, price, inds['atr'], self.notifier)
 
-                # Фильтр Low Risk (Взгляд издалека)
                 sma200 = self.get_sma_200(symbol, market)
                 if risk_profile == "Low":
                     if symbol not in self.blue_chips: continue
                     if sma200 > 0 and price < sma200: continue
 
-                # ИСПРАВЛЕНИЕ 1: Обогащаем словарь индикаторов новостями и трендом для GigaChat
                 news_text, news_sentiment = self.get_simulated_news(symbol)
                 inds['news_sentiment'] = news_sentiment
                 inds['news_feed'] = news_text
                 inds['sma200'] = round(sma200, 2)
+                # Добавляем тип рынка, чтобы ИИ понимал, где можно торговать закрытие гэпа
+                inds['market_type'] = market
 
                 m_tag = "[CRYPTO]" if market == "crypto" else "[MOEX]"
-                print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']} | Сентимент: {news_sentiment}")
+                gap_flag = f" | Гэп: {inds['gap_percent']}%" if abs(inds['gap_percent']) > 1.0 else ""
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']}{gap_flag}")
 
-                # Запускаем ИИ Анализ со всеми доступными данными
                 decision = self.ai.analyze_market_state(symbol, price, vol, inds)
                 decision['market_change'] = round(change, 2)
                 decision['current_price'] = price
@@ -192,7 +201,6 @@ class GlobalScanner:
                 action = decision.get('action', 'HOLD')
                 state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}."
 
-                # Риск-Менеджмент и Исполнение
                 if action in ["BUY", "SELL"]:
                     approved, rm_reason = self.risk_manager.approve_signal(
                         symbol, action, price, inds['rsi'],
@@ -205,7 +213,6 @@ class GlobalScanner:
                     else:
                         tp, sl = decision.get('take_profit', 0.0), decision.get('stop_loss', 0.0)
 
-                        # Страховочный расчет стопов по ATR
                         if sl == 0: sl = price - (inds['atr'] * 2.0) if action == "BUY" else price + (inds['atr'] * 2.0)
                         if tp == 0: tp = price + (inds['atr'] * 4.0) if action == "BUY" else price - (inds['atr'] * 4.0)
 
@@ -217,7 +224,6 @@ class GlobalScanner:
                             self.notifier.send_signal(symbol, action, price, decision.get('reason', 'Сигнал ИИ'),
                                                       change, tp, sl)
 
-                # Сохраняем опыт
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute(

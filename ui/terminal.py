@@ -5,6 +5,9 @@ import os
 import requests
 import ta
 import sys
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection
@@ -67,27 +70,35 @@ def get_moex_assets_list():
         return ["SBER", "LKOH", "GAZP", "YDEX", "TCSG"]
 
 
-# --- СБОР ДАННЫХ ДЛЯ X-RAY ---
+# --- ДИНАМИЧЕСКИЙ СБОР ДАННЫХ ---
 @st.cache_data(ttl=15)
-def fetch_hub_candles(symbol, market_mode):
+def fetch_hub_candles(symbol, market_mode, tf_display="15 Минут"):
     try:
         if market_mode == "crypto":
+            tf_map = {"15 Минут": "15", "1 Час": "60", "1 День": "D"}
+            interval = tf_map.get(tf_display, "15")
+
             from pybit.unified_trading import HTTP
             client = HTTP(testnet=False)
-            res = client.get_kline(category="linear", symbol=symbol, interval="15", limit=150)
+            res = client.get_kline(category="linear", symbol=symbol, interval=interval, limit=150)
             if res['retCode'] == 0:
                 df = pd.DataFrame(res['result']['list'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 't'])
                 df = df.iloc[::-1]
                 for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
+                df['ts'] = pd.to_datetime(pd.to_numeric(df['ts']), unit='ms')
                 return df
         else:
-            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?interval=24&limit=150"
+            tf_map = {"15 Минут": "10", "1 Час": "60", "1 День": "24"}
+            interval = tf_map.get(tf_display, "24")
+
+            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?interval={interval}&limit=150"
             res = requests.get(url, timeout=5).json()
             if 'candles' in res and res['candles']['data']:
                 df = pd.DataFrame(res['candles']['data'], columns=res['candles']['columns'])
                 df = df.rename(
                     columns={'begin': 'ts', 'open': 'o', 'high': 'h', 'low': 'l', 'close': 'c', 'volume': 'v'})
                 for col in ['o', 'h', 'l', 'c', 'v']: df[col] = df[col].astype(float)
+                df['ts'] = pd.to_datetime(df['ts'])
                 return df
     except:
         pass
@@ -114,16 +125,104 @@ def load_hub_finances(market_mode):
     return df_history, df_portfolio
 
 
-# Метод отрисовки без устаревших параметров прокрутки
-def render_stable_hub_chart(symbol, market_mode, tf_display):
-    exchange = "BYBIT" if market_mode == "crypto" else "MOEX"
-    tv_symbol = f"{exchange}:{symbol}"
+# --- НАТИВНЫЙ РЕНДЕР ГРАФИКА: ПРОФИЛЬ ОБЪЕМА И АВТО-ТА ---
+def render_native_chart(df, symbol):
+    if df.empty:
+        st.warning("Ожидание данных для отрисовки графика...")
+        return
 
-    tf_map = {"15 Минут": "15", "1 Час": "60", "1 День": "D"}
-    interval = tf_map.get(tf_display, "15")
+    # Убираем дыры во времени (Категориальная ось X)
+    time_labels = df['ts'].dt.strftime('%d.%m %H:%M') if 'Минут' in st.session_state.get('c_tf',
+                                                                                         '15 Минут') or 'Час' in st.session_state.get(
+        'c_tf', '') else df['ts'].dt.strftime('%Y-%m-%d')
 
-    embed_url = f"https://s.tradingview.com/widgetembed/?symbol={tv_symbol}&interval={interval}&theme=dark&locale=ru"
-    st.iframe(embed_url, height=520)
+    # --- 1. АЛГОРИТМ ПРОФИЛЯ ОБЪЕМА (Volume Profile) ---
+    min_p, max_p = df['l'].min(), df['h'].max()
+    # Делим весь ценовой диапазон на 40 уровней
+    bins = np.linspace(min_p, max_p, 40)
+    df['typ_price'] = (df['h'] + df['l'] + df['c']) / 3
+    df['bin'] = pd.cut(df['typ_price'], bins=bins)
+
+    # Считаем сумму заявок (объема) на каждом уровне цены
+    vol_profile = df.groupby('bin', observed=False)['v'].sum().reset_index()
+    vol_profile['mid'] = vol_profile['bin'].apply(lambda x: x.mid)
+
+    # Находим POC (Point of Control) - самый сильный уровень на графике
+    poc_idx = vol_profile['v'].idxmax()
+    poc_price = vol_profile.loc[poc_idx, 'mid']
+
+    # Ищем другие крупные скопления ликвидности (Поддержки/Сопротивления)
+    mean_vol = vol_profile['v'].mean()
+    high_vol_nodes = vol_profile[vol_profile['v'] > mean_vol * 1.5]
+
+    # --- СОЗДАНИЕ ДВОЙНОГО ХОЛСТА (Свечи + Гистограмма справа) ---
+    fig = make_subplots(rows=1, cols=2, shared_yaxes=True, column_widths=[0.85, 0.15], horizontal_spacing=0.01)
+
+    # Левая часть: Свечи
+    fig.add_trace(go.Candlestick(
+        x=time_labels, open=df['o'], high=df['h'], low=df['l'], close=df['c'],
+        increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
+        name=symbol, showlegend=False
+    ), row=1, col=1)
+
+    # Правая часть: Горизонтальные объемы (заявки)
+    fig.add_trace(go.Bar(
+        x=vol_profile['v'], y=vol_profile['mid'], orientation='h',
+        marker_color='rgba(132, 142, 156, 0.4)',
+        name='Объем заявок', showlegend=False, hoverinfo='skip'
+    ), row=1, col=2)
+
+    # --- 2. БОТ РИСУЕТ ТЕХ АНАЛИЗ ---
+    current_price = df['c'].iloc[-1]
+
+    # Отрисовка линии POC
+    fig.add_hline(y=poc_price, line_dash="solid", line_color="#F3BA2F", line_width=2,
+                  annotation_text="POC (Главная база)", annotation_position="top left",
+                  annotation_font_color="#F3BA2F", row=1, col=1)
+
+    # Отрисовка умных зон Поддержки и Сопротивления по объемам
+    for _, row in high_vol_nodes.iterrows():
+        price_lvl = row['mid']
+        # Фильтруем линии, чтобы они не слипались с POC
+        if abs(price_lvl - poc_price) > (max_p - min_p) * 0.04:
+            color = "#ef5350" if price_lvl > current_price else "#26a69a"
+            text = "Сопротивление" if price_lvl > current_price else "Поддержка"
+            fig.add_hline(y=price_lvl, line_dash="dash",
+                          line_color=f"rgba({'239,83,80' if color == '#ef5350' else '38,166,154'}, 0.5)",
+                          annotation_text=text, annotation_position="top left", annotation_font_color=color,
+                          annotation_font_size=10,
+                          row=1, col=1)
+
+    # Отрисовка Вектора Тренда (Бот проводит Линейную Регрессию)
+    x_numeric = np.arange(len(df))
+    z = np.polyfit(x_numeric, df['c'], 1)
+    p = np.poly1d(z)
+
+    fig.add_trace(go.Scatter(
+        x=time_labels, y=p(x_numeric), mode='lines',
+        line=dict(color='rgba(255, 255, 255, 0.5)', width=1.5, dash='dot'),
+        name='Вектор тренда', showlegend=False
+    ), row=1, col=1)
+
+    # Настройки интерфейса графика
+    fig.update_layout(
+        template="plotly_dark",
+        margin=dict(l=0, r=0, t=10, b=0),
+        height=540,
+        xaxis_rangeslider_visible=False,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        dragmode='pan',  # Двигаем левой кнопкой мыши
+        hovermode="x unified",
+        barmode='overlay'
+    )
+
+    fig.update_xaxes(type='category', nticks=10, showgrid=False, row=1, col=1)
+    fig.update_xaxes(showgrid=False, showticklabels=False, row=1, col=2)
+    fig.update_yaxes(side="right", showgrid=True, gridcolor="rgba(128,128,128,0.15)", row=1, col=2)
+
+    # Зум на колесико
+    st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False})
 
 
 # ЗАГРУЗКА ДАННЫХ
@@ -149,16 +248,16 @@ with hub_crypto:
                                          key="c_sym")
             crypto_tf = c2.selectbox("Таймфрейм графика", ["15 Минут", "1 Час", "1 День"], key="c_tf")
 
-            render_stable_hub_chart(crypto_symbol, "crypto", crypto_tf)
+            crypto_df = fetch_hub_candles(crypto_symbol, "crypto", crypto_tf)
+            render_native_chart(crypto_df, crypto_symbol)
 
         with col_xray:
             with st.container(border=True):
                 st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{crypto_symbol}**")
-                candles_df = fetch_hub_candles(crypto_symbol, "crypto")
 
-                if not candles_df.empty and len(candles_df) >= 15:
-                    live_price = candles_df['c'].iloc[-1]
-                    rsi_value = ta.momentum.RSIIndicator(candles_df['c'], window=14).rsi().iloc[-1]
+                if not crypto_df.empty and len(crypto_df) >= 15:
+                    live_price = crypto_df['c'].iloc[-1]
+                    rsi_value = ta.momentum.RSIIndicator(crypto_df['c'], window=14).rsi().iloc[-1]
 
                     st.metric("Текущая цена", f"${live_price:,.2f}")
                     st.metric("Мгновенный RSI", f"{rsi_value:.2f}")
@@ -223,7 +322,7 @@ with hub_crypto:
         m1.metric("Свободный баланс", f"${free_usdt:,.2f}")
         m2.metric("Чистый Профит (Крипта)", f"${crypto_profit:,.2f}",
                   delta=f"{crypto_profit:+.2f}$" if crypto_profit != 0 else None)
-        m3.metric("Active Positions", len(active_positions))
+        m3.metric("Активных позиций", len(active_positions))
 
         st.markdown("---")
         c_p, c_h = st.columns([1, 2])
@@ -248,22 +347,21 @@ with hub_moex:
                                         index=all_moex.index("SBER") if "SBER" in all_moex else 0, key="m_sym")
             moex_tf = c2m.selectbox("Таймфрейм графика", ["15 Минут", "1 Час", "1 День"], key="m_tf")
 
-            render_stable_hub_chart(moex_symbol, "stocks", moex_tf)
+            moex_df = fetch_hub_candles(moex_symbol, "stocks", moex_tf)
+            render_native_chart(moex_df, moex_symbol)
 
         with col_xray_m:
             with st.container(border=True):
                 st.markdown(f"#### 🔍 X-RAY АНАЛИЗ\n**{moex_symbol}**")
-                candles_df_m = fetch_hub_candles(moex_symbol, "stocks")
 
-                if not candles_df_m.empty and len(candles_df_m) >= 15:
-                    live_price_m = candles_df_m['c'].iloc[-1]
-                    rsi_value_m = ta.momentum.RSIIndicator(candles_df_m['c'], window=14).rsi().iloc[-1]
+                if not moex_df.empty and len(moex_df) >= 15:
+                    live_price_m = moex_df['c'].iloc[-1]
+                    rsi_value_m = ta.momentum.RSIIndicator(moex_df['c'], window=14).rsi().iloc[-1]
 
                     st.metric("Цена акции", f"{live_price_m:,.2f} ₽")
                     st.metric("Мгновенный RSI", f"{rsi_value_m:.2f}")
 
-                    sma200 = candles_df_m['c'].mean() if len(candles_df_m) < 200 else \
-                    candles_df_m['c'].rolling(200).mean().iloc[-1]
+                    sma200 = moex_df['c'].mean() if len(moex_df) < 200 else moex_df['c'].rolling(200).mean().iloc[-1]
                     if live_price_m > sma200:
                         st.success("UPTREND 📈 (Выше SMA 200)")
                     else:
