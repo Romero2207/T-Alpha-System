@@ -25,7 +25,7 @@ class RiskSettings(BaseModel):
 
 # ИСПРАВЛЕНИЕ: Вместо жесткого пула делаем динамический эндпоинт для ВСЕХ бумаг
 @app.get("/api/assets/{market}")
-async def get_all_assets(market: str):
+def get_all_assets(market: str):
     try:
         if market == "crypto":
             # Запрашиваем вообще все линейные USDT пары с Bybit
@@ -46,7 +46,7 @@ async def get_all_assets(market: str):
 
 
 @app.get("/api/portfolio")
-async def get_portfolio():
+def get_portfolio():
     try:
         conn = get_connection()
         p_df = pd.read_sql_query("SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0", conn)
@@ -87,7 +87,7 @@ async def get_portfolio():
 
 
 @app.get("/api/logs")
-async def get_logs():
+def get_logs():
     """Подтягиваем мысли ИИ из базы данных"""
     try:
         conn = get_connection()
@@ -123,7 +123,7 @@ async def get_logs():
 
 
 @app.get("/api/settings")
-async def get_settings():
+def get_settings():
     """Отдаем текущие настройки риска фронтенду при обновлении страницы"""
     try:
         if os.path.exists("settings.json"):
@@ -133,7 +133,7 @@ async def get_settings():
     return {"crypto": "low", "moex": "low"}
 
 @app.post("/api/settings")
-async def save_settings(settings: RiskSettings):
+def save_settings(settings: RiskSettings):
     """API для сохранения уровня риска через Pydantic-модель"""
     try:
         # Сохраняем в файл, вытаскивая данные из модели
@@ -144,7 +144,7 @@ async def save_settings(settings: RiskSettings):
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/history/{symbol}")
-async def get_history(symbol: str):
+def get_history(symbol: str):
     try:
         if "USDT" in symbol:
             res = bybit_client.get_kline(category="linear", symbol=symbol, interval="15", limit=200)

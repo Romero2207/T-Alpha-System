@@ -135,11 +135,14 @@ class BrainNode:
             if "HOLD" not in signal["action"]:
                 print(f"⚡ [Brain] ОДОБРЕН БОЕВОЙ СИГНАЛ: {signal['action']} {symbol}")
                 await self.bus.publish("TRADE_SIGNAL", signal)
-            else:
-                # Если позицию просто удерживаем, возвращаем статус в дефолтный режим ожидания тиков
-                await asyncio.sleep(3)
-                await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
-                                                           "text": f"🟢 Анализ {symbol} завершен (HOLD). Ожидаю новые тики рынка..."})
+                # 5. Отправка сигнала на исполнение
+                if "HOLD" not in signal["action"]:
+                    print(f"⚡ [Brain] ОДОБРЕН БОЕВОЙ СИГНАЛ: {signal['action']} {symbol}")
+                    await self.bus.publish("TRADE_SIGNAL", signal)
+                else:
+                    # Никаких sleep! Мгновенно отправляем статус и освобождаем ядро
+                    await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                               "text": f"🟢 Анализ {symbol} завершен (HOLD). Ожидаю новые тики рынка..."})
 
     def save_to_db(self, state_desc, decision):
         """Синхронная функция сохранения в SQLite"""

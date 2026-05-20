@@ -99,6 +99,9 @@ class AIEngine:
                 end = result_text.rfind('}') + 1
                 decision = json.loads(result_text[start:end])
 
+                print(
+                    f"💭 [GigaChat] Вердикт по {symbol}: {decision.get('action')} | Уверенность: {decision.get('confidence')}%")
+
                 if "take_profit" not in decision: decision["take_profit"] = 0.0
                 if "stop_loss" not in decision: decision["stop_loss"] = 0.0
                 return decision
