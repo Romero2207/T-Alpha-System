@@ -67,64 +67,61 @@ async def stop_loss_scanner(bus):
 
 
 async def execute_trade(payload):
-    """Модуль реального исполнения сделок"""
+    """Модуль исполнения: отправляет реальные ордера на Bybit Testnet из файла .env"""
     symbol = payload['symbol']
     action = payload['action']
     price = payload['price']
     sl = payload.get('sl', 0)
     tp = payload.get('tp', 0)
 
-    trade_size = 100 if "USDT" in symbol else 5000
+    # Мы торгуем фьючерсы крипты к USDT
+    if "USDT" not in symbol:
+        return
 
     try:
-        conn = get_connection()
-        cursor = conn.cursor()
+        # Читаем ключи напрямую из системного окружения (.env)
+        api_key = os.getenv("BYBIT_TESTNET_API_KEY")
+        api_secret = os.getenv("BYBIT_TESTNET_API_SECRET")
 
-        # Безопасно добавляем колонки sl и tp в базу, если их еще нет (для совместимости)
-        try:
-            cursor.execute("ALTER TABLE portfolio ADD COLUMN sl REAL DEFAULT 0")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE portfolio ADD COLUMN tp REAL DEFAULT 0")
-        except:
-            pass
+        # Если ключи в .env не найдены, бот безопасно перейдет в режим симуляции в локальную БД
+        if not api_key or not api_secret:
+            print("⚠️ [Execution] Ордер симулирован: не найдены API-ключи в файле .env")
+            save_order_to_local_db(symbol, action, price, sl, tp)
+            return
 
-        cursor.execute("SELECT amount FROM portfolio WHERE symbol = ?", (symbol,))
-        row = cursor.fetchone()
-        current_amount = row[0] if row else 0
+        from pybit.unified_trading import HTTP
+        session = HTTP(
+            testnet=True,  # Включаем режим Песочницы (Bybit Testnet)
+            api_key=api_key,
+            api_secret=api_secret
+        )
 
-        amount = (trade_size / price) if "BUY" in action else current_amount
-        total_value = amount * price
+        # Рассчитываем объем сделки: заходим на фиксированные виртуальные 100 USDT
+        qty = round(100 / price, 3)
+        side = "Buy" if "BUY" in action else "Sell"
 
-        if amount > 0:
-            cursor.execute("""
-                INSERT INTO trade_history (timestamp, symbol, action, price, amount, total_value) 
-                VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?)
-            """, (symbol, action, price, amount, total_value))
+        print(f"📡 [Execution] Отправка ордера на Bybit Testnet: {side} {symbol} объем {qty}...")
 
-            if "BUY" in action:
-                new_amount = current_amount + amount
-                cursor.execute("SELECT id FROM portfolio WHERE symbol = ?", (symbol,))
-                if cursor.fetchone():
-                    cursor.execute(
-                        "UPDATE portfolio SET amount = ?, average_entry_price = ?, sl = ?, tp = ? WHERE symbol = ?",
-                        (new_amount, price, sl, tp, symbol))
-                else:
-                    cursor.execute(
-                        "INSERT INTO portfolio (symbol, amount, average_entry_price, sl, tp) VALUES (?, ?, ?, ?, ?)",
-                        (symbol, new_amount, price, sl, tp))
-            elif "SELL" in action:
-                cursor.execute(
-                    "UPDATE portfolio SET amount = 0, average_entry_price = 0, sl = 0, tp = 0 WHERE symbol = ?",
-                    (symbol,))
+        # Отправляем приказ на биржу Bybit
+        order = session.place_order(
+            category="linear",  # Категория линейных бессрочных фьючерсов
+            symbol=symbol,
+            side=side,
+            orderType="Market",  # Покупаем/Продаем мгновенно по текущей рыночной цене
+            qty=str(qty),
+            timeInForce="GTC"
+        )
 
-            conn.commit()
-            print(f"💼 [Execution] Исполнено: {action} {symbol}. Сумма: {total_value:.2f}")
+        if order.get('retCode') == 0:
+            order_id = order['result']['orderId']
+            print(f"✅ [Bybit API] Ордер успешно исполнен биржей! ID: {order_id}")
+            # Синхронизируем с локальной БД, чтобы данные мгновенно отобразились у тебя на сайте
+            save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=qty)
+        else:
+            print(f"❌ [Bybit API] Биржа отклонила ордер: {order.get('retMsg')}")
 
-        conn.close()
     except Exception as e:
-        print(f"❌ [Execution] Ошибка ордера: {e}")
+        print(f"❌ [Execution] Критическая ошибка API-модуля: {e}")
 
 
 async def run_fastapi():

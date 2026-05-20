@@ -7,4 +7,5 @@ gigachat
 requests
 pytz
 ta
-fastapi uvicorn
+fastapi
+uvicorn

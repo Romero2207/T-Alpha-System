@@ -10,6 +10,7 @@ from fastapi.responses import HTMLResponse
 from pybit.unified_trading import HTTP
 import requests
 import json
+from pydantic import BaseModel
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection
@@ -18,6 +19,9 @@ app = FastAPI()
 system_bus = None
 bybit_client = HTTP(testnet=False)
 
+class RiskSettings(BaseModel):
+    crypto: str
+    moex: str
 
 # ИСПРАВЛЕНИЕ: Вместо жесткого пула делаем динамический эндпоинт для ВСЕХ бумаг
 @app.get("/api/assets/{market}")
@@ -127,6 +131,17 @@ async def get_settings():
                 return json.load(f)
     except: pass
     return {"crypto": "low", "moex": "low"}
+
+@app.post("/api/settings")
+async def save_settings(settings: RiskSettings):
+    """API для сохранения уровня риска через Pydantic-модель"""
+    try:
+        # Сохраняем в файл, вытаскивая данные из модели
+        with open("settings.json", "w") as f:
+            json.dump({"crypto": settings.crypto, "moex": settings.moex}, f)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/history/{symbol}")
 async def get_history(symbol: str):
@@ -396,7 +411,7 @@ HTML_CONTENT = """
         function saveSettings(btn) {
             const cryptoMode = document.getElementById('setting-crypto').value;
             const moexMode = document.getElementById('setting-moex').value;
-
+            
             fetch('/api/settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -411,7 +426,13 @@ HTML_CONTENT = """
                         btn.style.color = '#000';
                         btn.innerText = 'Сохранить настройки';
                     }, 2000);
+                } else {
+                    // Если сервер вернул ошибку, покажем её
+                    alert("Ошибка на сервере: " + (data.message || "Неизвестная ошибка"));
                 }
+            }).catch(e => {
+                // Если нет связи с сервером или ошибка в JS
+                alert("Ошибка связи с ядром. Нажми Ctrl + F5, чтобы сбросить кэш браузера!");
             });
         }
 
