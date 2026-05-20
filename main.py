@@ -1,35 +1,48 @@
-import subprocess
-import sys
-import time
-import os
+import asyncio
+import uvicorn
+from core.event_bus import SystemEventBus
+from engine.data_collector import AsyncDataCollector
+from engine.brain_node import BrainNode
+import ui.web_server as web_ui
 
 
-def start_system():
-    print("=" * 50)
-    print("ВОССТАНОВЛЕНИЕ T-ALPHA PRO...")
-    print("=" * 50)
+async def run_fastapi():
+    # Запускаем Uvicorn (FastAPI) в фоне
+    config = uvicorn.Config(web_ui.app, host="127.0.0.1", port=8000, log_level="error")
+    server = uvicorn.Server(config)
+    await server.serve()
 
-    # 1. Движок
-    collector_script = os.path.join("engine", "data_collector.py")
-    subprocess.Popen([sys.executable, collector_script])
 
-    time.sleep(2)
+async def main():
+    print("Инициализация T-Alpha Core...")
+    bus = SystemEventBus()
 
-    # 2. Терминал (Стабильный режим)
-    terminal_script = os.path.join("ui", "terminal.py")
-    subprocess.Popen([
-        sys.executable, "-m", "streamlit", "run", terminal_script,
-        "--server.runOnSave", "false",
-        "--server.fileWatcherType", "none",
-        "--server.address", "127.0.0.1"
-    ])
+    # Передаем шину событий в веб-сервер
+    web_ui.system_bus = bus
 
-    print("\n✅ СИСТЕМА ЗАПУЩЕНА! Откройте http://127.0.0.1:8501")
+    collector = AsyncDataCollector(bus)
+    brain = BrainNode(bus)
+
+    bus.subscribe("MARKET_TICK", brain.handle_tick)
+
+    bus_task = asyncio.create_task(bus.run())
+    collector_task = asyncio.create_task(collector.run())
+    web_task = asyncio.create_task(run_fastapi())
+
+    print("✅ Сервер запущен! Открой в браузере: http://127.0.0.1:8000")
+
     try:
-        while True: time.sleep(1)
+        while True:
+            await asyncio.sleep(1)
     except KeyboardInterrupt:
-        print("\nВыключение...")
+        print("\nОстановка системы...")
+    finally:
+        bus.is_running = False
+        collector.is_running = False
+        bus_task.cancel()
+        collector_task.cancel()
+        web_task.cancel()
 
 
 if __name__ == "__main__":
-    start_system()
+    asyncio.run(main())

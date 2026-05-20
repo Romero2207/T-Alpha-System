@@ -1,4 +1,4 @@
-streamlit
+prompt_toolkit
 pybit
 pandas
 python-dotenv
@@ -7,4 +7,4 @@ gigachat
 requests
 pytz
 ta
-plotly
+fastapi uvicorn

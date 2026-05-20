@@ -1,241 +1,81 @@
+import asyncio
 import time
-import sys
-import os
-import json
-import pandas as pd
-import requests
-import ta
+from typing import Dict, Any
 from pybit.unified_trading import HTTP
-from datetime import datetime, timedelta
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.memory import get_connection, init_db
-from ai.gigachat_api import AIEngine
-from engine.risk_manager import RiskManager
-from engine.portfolio_manager import PortfolioManager
-from core.notifier import TelegramNotifier
+import requests
 
 
-class GlobalScanner:
-    def __init__(self):
-        init_db()
-        self.ai = AIEngine()
-        self.risk_manager = RiskManager()
-        self.portfolio = PortfolioManager()
-        self.notifier = TelegramNotifier()
+class AsyncDataCollector:
+    def __init__(self, bus):
+        self.bus = bus
         self.bybit = HTTP(testnet=False)
-        self.config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".ai_config.json")
-        self.blue_chips = ["BTCUSDT", "ETHUSDT", "SBER", "LKOH", "GAZP", "YDEX", "TCSG"]
+        self.is_running = False
+        # Для начала берем узкий пул активов для демо
+        self.crypto_symbols = ["BTCUSDT", "ETHUSDT"]
+        self.moex_symbols = ["SBER", "LKOH"]
 
-    def get_risk_profile(self):
-        try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                return json.load(f).get("risk_profile", "Medium")
-        except:
-            return "Medium"
+    async def fetch_crypto_tickers(self):
+        """Асинхронный опрос криптобиржи (имитация веб-сокетов для старта)"""
+        while self.is_running:
+            try:
+                # В идеале здесь будет WebSocket, но пока делаем частые REST запросы
+                res = self.bybit.get_tickers(category="linear")
+                if res.get('retCode') == 0:
+                    for t in res['result']['list']:
+                        if t['symbol'] in self.crypto_symbols:
+                            payload = {
+                                "symbol": t['symbol'],
+                                "price": float(t['lastPrice']),
+                                "volume": float(t['turnover24h']),
+                                "market": "crypto",
+                                "timestamp": time.time()
+                            }
+                            # Публикуем тик в шину событий
+                            await self.bus.publish("MARKET_TICK", payload)
+            except Exception as e:
+                print(f"[DataCollector] Ошибка Bybit: {e}")
 
-    def get_sma_200(self, symbol, market="crypto"):
-        try:
-            if market == "crypto":
-                res = self.bybit.get_kline(category="linear", symbol=symbol, interval="D", limit=200)
-                if res['retCode'] == 0:
-                    closes = [float(x[4]) for x in res['result']['list']]
-                    return sum(closes) / len(closes) if len(closes) >= 50 else 0.0
-            else:
-                start_date = (datetime.now() - timedelta(days=300)).strftime('%Y-%m-%d')
-                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=24&from={start_date}"
-                res = requests.get(url, timeout=5).json()
-                data = res['candles']['data']
-                cols = res['candles']['columns']
-                if not data: return 0.0
-                idx_close = cols.index('close')
-                closes = [float(row[idx_close]) for row in data if row[idx_close] is not None][-200:]
-                return sum(closes) / len(closes) if len(closes) >= 50 else 0.0
-        except:
-            return 0.0
-        return 0.0
+            await asyncio.sleep(2)  # Пауза между опросами
 
-    def get_top_volatile_crypto(self, limit=3):
-        try:
-            res = self.bybit.get_tickers(category="linear")
-            if res.get('retCode') != 0: return []
-            tickers = res['result']['list']
-            hot = []
-            for t in tickers:
-                symbol = t['symbol']
-                if symbol.endswith('USDT') and not symbol.startswith('1000'):
-                    turnover = float(t['turnover24h'])
-                    change_pct = float(t['price24hPcnt']) * 100
-                    price = float(t['lastPrice'])
-                    if turnover > 20000000 and abs(change_pct) > 2.0:
-                        hot.append({'symbol': symbol, 'price': price, 'change': change_pct, 'volume': turnover,
-                                    'market': 'crypto'})
-            hot.sort(key=lambda x: abs(x['change']), reverse=True)
-            return hot[:limit]
-        except:
-            return []
+    async def fetch_moex_tickers(self):
+        """Асинхронный опрос Мосбиржи"""
+        while self.is_running:
+            try:
+                url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.only=marketdata"
+                # Используем run_in_executor для блокирующего requests
+                loop = asyncio.get_event_loop()
+                res = await loop.run_in_executor(None, requests.get, url)
 
-    def get_top_volatile_stocks(self, limit=3):
-        try:
-            url = "https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities.json?iss.only=marketdata"
-            res = requests.get(url, timeout=5).json()
-            data = res['marketdata']['data']
-            cols = res['marketdata']['columns']
-            idx_secid, idx_last, idx_vol, idx_change = cols.index('SECID'), cols.index('LAST'), cols.index(
-                'VALTODAY'), cols.index('LASTTOPREVPRICE')
-            hot = []
-            for row in data:
-                symbol, price, vol, change = row[idx_secid], row[idx_last], row[idx_vol], row[idx_change]
-                if price and vol and change and vol > 50000000 and abs(change) > 1.5:
-                    hot.append({'symbol': symbol, 'price': float(price), 'change': float(change), 'volume': float(vol),
-                                'market': 'stocks'})
-            hot.sort(key=lambda x: abs(x['change']), reverse=True)
-            return hot[:limit]
-        except:
-            return []
+                if res.status_code == 200:
+                    data = res.json()['marketdata']['data']
+                    cols = res.json()['marketdata']['columns']
 
-    def get_technical_indicators(self, symbol, market="crypto"):
-        try:
-            if market == "crypto":
-                res = self.bybit.get_kline(category="linear", symbol=symbol, interval=15, limit=50)
-                if res['retCode'] == 0:
-                    klines = res['result']['list']
-                    klines.reverse()
-                    df = pd.DataFrame(klines,
-                                      columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                else:
-                    return None
-            else:
-                start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-                url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?iss.meta=off&interval=10&from={start_date}"
-                res = requests.get(url, timeout=5).json()
-                if not res.get('candles', {}).get('data'): return None
-                df = pd.DataFrame(res['candles']['data'], columns=res['candles']['columns'])
+                    idx_secid = cols.index('SECID')
+                    idx_last = cols.index('LAST')
+                    idx_vol = cols.index('VALTODAY')
 
-            for col in ['open', 'high', 'low', 'close', 'volume']: df[col] = df[col].astype(float)
+                    for row in data:
+                        symbol = row[idx_secid]
+                        if symbol in self.moex_symbols and row[idx_last]:
+                            payload = {
+                                "symbol": symbol,
+                                "price": float(row[idx_last]),
+                                "volume": float(row[idx_vol] or 0),
+                                "market": "moex",
+                                "timestamp": time.time()
+                            }
+                            await self.bus.publish("MARKET_TICK", payload)
+            except Exception as e:
+                print(f"[DataCollector] Ошибка MOEX: {e}")
 
-            rsi = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi().iloc[-1]
-            macd_hist = ta.trend.MACD(close=df['close']).macd_diff().iloc[-1]
-            atr = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'],
-                                                 window=14).average_true_range().iloc[-1]
+            await asyncio.sleep(5)  # Акции обновляем реже
 
-            # ИСПРАВЛЕНИЕ: Расчет зон ликвидности (Поддержка и Сопротивление за 50 свечей)
-            local_high = df['high'].max()
-            local_low = df['low'].min()
+    async def run(self):
+        print("📡 [DataCollector] Запуск потоков данных...")
+        self.is_running = True
 
-            prev, curr = df.iloc[-2], df.iloc[-1]
-
-            # ИСПРАВЛЕНИЕ: Детектор Гэпа (Разрыв цены между закрытием прошлой и открытием новой свечи)
-            gap_percent = ((curr['open'] - prev['close']) / prev['close']) * 100
-
-            is_bull = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (
-                        curr['close'] >= prev['open']) and (curr['open'] <= prev['close'])
-            is_bear = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (
-                        curr['open'] >= prev['close']) and (curr['close'] <= prev['open'])
-            pattern = "Бычье поглощение" if is_bull else "Медвежье поглощение" if is_bear else "Нет явного паттерна"
-
-            return {
-                "rsi": round(rsi, 2) if not pd.isna(rsi) else 50.0,
-                "macd_hist": round(macd_hist, 6),
-                "atr": round(atr, 4),
-                "local_high": round(local_high, 4),
-                "local_low": round(local_low, 4),
-                "gap_percent": round(gap_percent, 2),
-                "pattern": pattern
-            }
-        except:
-            return {"rsi": 50.0, "macd_hist": 0, "atr": 0, "local_high": 0, "local_low": 0, "gap_percent": 0.0,
-                    "pattern": "Нет данных"}
-
-    def get_simulated_news(self, symbol):
-        news_db = {
-            "SBER": "Сбербанк отчитался о рекордном росте чистой прибыли по РСБУ. Ждем дивиденды.",
-            "GAZP": "Газпром столкнулся с дополнительным ростом налоговой нагрузки в виде НДПИ.",
-            "LKOH": "Лукойл оптимизирует логистические цепочки и увеличивает экспорт.",
-            "BTCUSDT": "Приток капитала в спотовые Биткоин-ETF бьет исторические рекорды."
-        }
-        text = news_db.get(symbol, f"Новостной фон по {symbol} нейтральный.")
-        sentiment = 0.65 if "рекорд" in text or "приток" in text else -0.55 if "налог" in text or "давление" in text else 0.0
-        return text, sentiment
-
-    def run(self):
-        print("=" * 50)
-        print("СИСТЕМА: ИНТЕЛЛЕКТУАЛЬНЫЙ СКАНЕР С ФИЛЬТРОМ РИСКОВ ЗАПУЩЕН")
-        print("=" * 50)
-
-        while True:
-            risk_profile = self.get_risk_profile()
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🛡️ Текущий профиль риска: {risk_profile}")
-
-            targets = self.get_top_volatile_crypto(limit=3) + self.get_top_volatile_stocks(limit=3)
-
-            for asset in targets:
-                symbol, price, change, vol, market = asset['symbol'], asset['price'], asset['change'], asset['volume'], \
-                asset['market']
-
-                inds = self.get_technical_indicators(symbol, market=market)
-                if not inds: continue
-
-                self.portfolio.monitor_positions(symbol, price, inds['atr'], self.notifier)
-
-                sma200 = self.get_sma_200(symbol, market)
-                if risk_profile == "Low":
-                    if symbol not in self.blue_chips: continue
-                    if sma200 > 0 and price < sma200: continue
-
-                news_text, news_sentiment = self.get_simulated_news(symbol)
-                inds['news_sentiment'] = news_sentiment
-                inds['news_feed'] = news_text
-                inds['sma200'] = round(sma200, 2)
-                # Добавляем тип рынка, чтобы ИИ понимал, где можно торговать закрытие гэпа
-                inds['market_type'] = market
-
-                m_tag = "[CRYPTO]" if market == "crypto" else "[MOEX]"
-                gap_flag = f" | Гэп: {inds['gap_percent']}%" if abs(inds['gap_percent']) > 1.0 else ""
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {m_tag} {symbol} | RSI: {inds['rsi']}{gap_flag}")
-
-                decision = self.ai.analyze_market_state(symbol, price, vol, inds)
-                decision['market_change'] = round(change, 2)
-                decision['current_price'] = price
-
-                action = decision.get('action', 'HOLD')
-                state_desc = f"{m_tag} Аномалия: {symbol}. Δ: {change:+.2f}%. Цена: {price}."
-
-                if action in ["BUY", "SELL"]:
-                    approved, rm_reason = self.risk_manager.approve_signal(
-                        symbol, action, price, inds['rsi'],
-                        news_sentiment=news_sentiment, risk_profile=risk_profile
-                    )
-
-                    if not approved:
-                        decision['action'] = f"HOLD (Blocked: {action})"
-                        decision['reason'] = rm_reason
-                    else:
-                        tp, sl = decision.get('take_profit', 0.0), decision.get('stop_loss', 0.0)
-
-                        if sl == 0: sl = price - (inds['atr'] * 2.0) if action == "BUY" else price + (inds['atr'] * 2.0)
-                        if tp == 0: tp = price + (inds['atr'] * 4.0) if action == "BUY" else price - (inds['atr'] * 4.0)
-
-                        trade_ok = self.portfolio.execute_paper_trade(symbol, action, price, tp=tp, sl=sl,
-                                                                      reason=decision.get('reason', 'AI Signal'))
-                        if trade_ok:
-                            print(
-                                f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 АВТОПИЛОТ: Сделка {action} по {symbol} исполнена!")
-                            self.notifier.send_signal(symbol, action, price, decision.get('reason', 'Сигнал ИИ'),
-                                                      change, tp, sl)
-
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT INTO experience_replay (timestamp, market_state, ai_decision) VALUES (datetime('now', 'localtime'), ?, ?)",
-                    (state_desc, json.dumps(decision, ensure_ascii=False))
-                )
-                conn.commit()
-                conn.close()
-
-            time.sleep(60)
-
-
-if __name__ == "__main__":
-    scanner = GlobalScanner()
-    scanner.run()
+        # Запускаем сборщики параллельно
+        await asyncio.gather(
+            self.fetch_crypto_tickers(),
+            self.fetch_moex_tickers()
+        )
