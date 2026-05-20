@@ -356,25 +356,34 @@ HTML_CONTENT = """
         </div>
     </div>
 
-    <div id="tab-ai" class="tab-content">
+<div id="tab-ai" class="tab-content">
         <div class="dash-grid">
-            <div class="panel">
-                <div class="panel-title">⚙️ Настройки Риск-Менеджмента</div>
-                <div style="margin-bottom: 20px;">
-                    <label style="color:var(--text);">Стратегия Крипторынка:</label><br>
-                    <select id="setting-crypto" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
-                        <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
-                        <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
-                    </select>
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <div class="panel">
+                    <div class="panel-title">⚙️ Настройки Риск-Менеджмента</div>
+                    <div style="margin-bottom: 20px;">
+                        <label style="color:var(--text);">Стратегия Крипторынка:</label><br>
+                        <select id="setting-crypto" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
+                            <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
+                            <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="color:var(--text);">Стратегия Фонтового рынка:</label><br>
+                        <select id="setting-moex" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
+                            <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
+                            <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
+                        </select>
+                    </div>
+                    <button onclick="saveSettings(this)" style="margin-top: 20px; padding: 10px; background:var(--accent); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition: 0.3s;">Сохранить настройки</button>
                 </div>
-                <div>
-                    <label style="color:var(--text);">Стратегия Фондового рынка:</label><br>
-                    <select id="setting-moex" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
-                        <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
-                        <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
-                    </select>
+
+                <div class="panel" style="flex: 1; display: flex; flex-direction: column; min-height: 180px;">
+                    <div class="panel-title" style="color: var(--accent);">📡 Прямой эфир: Что ИИ делает сейчас</div>
+                    <div id="ai-live-status" style="font-family: monospace; font-size: 0.95rem; color: #fff; padding: 15px; background: rgba(0,0,0,0.2); border-radius: 4px; border-left: 4px solid var(--accent); flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; line-height: 1.5; transition: 0.3s;">
+                        🟢 Система активна. Ожидание рыночных тиков...
+                    </div>
                 </div>
-                <button onclick="saveSettings(this)" style="margin-top: 20px; padding: 10px; background:var(--accent); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition: 0.3s;">Сохранить настройки</button>
             </div>
 
             <div class="panel" style="height: calc(100vh - 200px); display:flex; flex-direction:column;">
@@ -714,6 +723,16 @@ HTML_CONTENT = """
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.tp, y1: data.tp, line: {color: '#0ECB81', width: 2, dash: 'dash'} });
                     Plotly.relayout(domElement, { shapes: layout.shapes });
                 }
+                // ЛОВИМ ПРЯМОЙ ЭФИР МЫСЛЕЙ ИИ
+            if (msg.event === "AI_LIVE_THOUGHT") {
+                const statusBox = document.getElementById('ai-live-status');
+                if (statusBox) {
+                    statusBox.innerHTML = `<strong>[${msg.data.symbol}]</strong> ${msg.data.text}`;
+                    // Визуальный эффект мягкой вспышки при обновлении мысли
+                    statusBox.style.background = 'rgba(243, 186, 47, 0.08)';
+                    setTimeout(() => { statusBox.style.background = 'rgba(0,0,0,0.2)'; }, 300);
+                }
+            }
             }
         };
     </script>

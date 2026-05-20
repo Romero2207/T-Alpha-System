@@ -200,6 +200,16 @@ async def run_fastapi():
 
 async def main():
     print("Инициализация T-Alpha Core...")
+    # --- ГЛУШИТЕЛЬ ОШИБКИ WinError 10054 ---
+    loop = asyncio.get_running_loop()
+
+    def handle_exception(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) and exc.winerror == 10054:
+            return  # Просто игнорируем этот системный спам Windows
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handle_exception)
     bus = SystemEventBus()
     web_ui.system_bus = bus
 

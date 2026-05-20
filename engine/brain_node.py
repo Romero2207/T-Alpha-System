@@ -87,16 +87,20 @@ class BrainNode:
 
         # Анализируем актив раз в 60 секунд
         if current_time - last_time >= 60:
-            print(f"🧠 [Brain] Сбор данных и запрос к нейросети для {symbol}...")
             self.last_analysis_time[symbol] = current_time
+            print(f"🧠 [Brain] Сбор данных для {symbol}...")
 
             loop = asyncio.get_running_loop()
 
-            # 1. Получаем индикаторы в фоновом потоке
+            # ЭТАП 1: Сбор индикаторов
+            await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                       "text": "📊 Сбор рыночных стаканов, расчет RSI, MACD и волатильности ATR..."})
             inds = await loop.run_in_executor(None, self.get_technical_indicators, symbol, market)
             if not inds: return
 
-            # 2. Вызываем GigaChat в фоновом потоке (чтобы не блокировать систему)
+            # ЭТАП 2: Запрос к нейросети
+            await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                       "text": f"🧠 Отправка параметров (RSI={inds['rsi']}, Паттерн={inds['pattern']}) в GigaChat API..."})
             decision = await loop.run_in_executor(None, self.ai.analyze_market_state, symbol, price, payload['volume'],
                                                   inds)
 
@@ -104,28 +108,26 @@ class BrainNode:
             reason = decision.get('reason', 'Анализ завершен')
             confidence = decision.get('confidence', 0)
 
-            # 3. Пропускаем решение через Risk Manager (передаем все индикаторы, включая ATR)
+            # ЭТАП 3: Проверка лимитов Риск-Менеджера
+            await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                       "text": f"💭 ИИ вернул вердикт: {action} ({confidence}%). Передаю на аудит Риск-Менеджеру..."})
             approved, rm_reason, sl, tp = self.risk_manager.approve_signal(symbol, action, price, inds)
 
             if not approved and action != "HOLD":
                 action = f"HOLD (Блок Риск-менеджера: {action})"
                 reason = rm_reason
-                sl, tp = 0, 0
+                await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                           "text": f"🛡️ Риск-менеджер ЗАБЛОКИРОВАЛ операцию. Причина: {rm_reason}"})
             elif approved and action != "HOLD":
-                reason = f"{reason} | {rm_reason}"  # Добавляем к мыслям ИИ вердикт Риск-менеджера
+                await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                           "text": f"⚡ Сигнал {action} ОДОБРЕН! Выставляем цели: TP={tp} | SL={sl}. Отправка на биржу Bybit..."})
 
             signal = {
-                "symbol": symbol,
-                "action": action,
-                "price": price,
-                "confidence": confidence,
-                "reason": reason,
-                "sl": sl,  # <-- Передаем Stop Loss
-                "tp": tp  # <-- Передаем Take Profit
+                "symbol": symbol, "action": action, "price": price,
+                "confidence": confidence, "reason": reason, "sl": sl, "tp": tp
             }
 
-            # 4. Запись мыслей в базу
-            # 4. Запись мыслей в базу (для сайта)
+            # 4. Запись мыслей в базу для сохранения в глобальном журнале
             state_desc = f"[{market.upper()}] Аномалия: {symbol}. Цена: {price}. Паттерн: {inds['pattern']}"
             await loop.run_in_executor(None, self.save_to_db, state_desc, signal)
 
@@ -133,6 +135,11 @@ class BrainNode:
             if "HOLD" not in signal["action"]:
                 print(f"⚡ [Brain] ОДОБРЕН БОЕВОЙ СИГНАЛ: {signal['action']} {symbol}")
                 await self.bus.publish("TRADE_SIGNAL", signal)
+            else:
+                # Если позицию просто удерживаем, возвращаем статус в дефолтный режим ожидания тиков
+                await asyncio.sleep(3)
+                await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
+                                                           "text": f"🟢 Анализ {symbol} завершен (HOLD). Ожидаю новые тики рынка..."})
 
     def save_to_db(self, state_desc, decision):
         """Синхронная функция сохранения в SQLite"""
