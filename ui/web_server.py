@@ -9,6 +9,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pybit.unified_trading import HTTP
 import requests
+import json
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection
@@ -82,6 +83,39 @@ async def get_portfolio():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
+@app.get("/api/logs")
+async def get_logs():
+    """Подтягиваем мысли ИИ из базы данных"""
+    try:
+        conn = get_connection()
+        # Берем последние 30 записей логов
+        df = pd.read_sql_query(
+            "SELECT timestamp, market_state, ai_decision FROM experience_replay ORDER BY id DESC LIMIT 30", conn)
+        conn.close()
+
+        logs = []
+        for _, row in df.iterrows():
+            try:
+                dec = json.loads(row['ai_decision'])
+                # Парсим название тикера из строки market_state
+                state_text = row['market_state']
+                symbol = state_text.split('Аномалия: ')[1].split('.')[
+                    0].strip() if 'Аномалия:' in state_text else 'Анализ'
+
+                logs.append({
+                    "time": row['timestamp'].split(' ')[1],
+                    "symbol": symbol,
+                    "state": state_text,
+                    "action": dec.get("action", "HOLD"),
+                    "reason": dec.get("reason", "Анализ рынка..."),
+                    "conf": dec.get("confidence", 0)
+                })
+            except:
+                pass
+        return {"status": "ok", "data": logs}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/history/{symbol}")
 async def get_history(symbol: str):
@@ -246,7 +280,7 @@ HTML_CONTENT = """
     </div>
 
     <div id="tab-trade" class="tab-content">
-        <div class="ticker-selector" style="align-items: center; gap: 8px;">
+        <div class="ticker-selector" style="align-items: center; gap: 8px; position: relative;">
             <select id="market-select" onchange="changeMarket(this.value)" style="flex: 1;">
                 <option value="crypto">🪙 Крипторынок (Bybit)</option>
                 <option value="moex">🏛️ Фондовый рынок (MOEX)</option>
@@ -254,12 +288,19 @@ HTML_CONTENT = """
             <select id="symbol-select" onchange="changeSymbol(this.value)" style="flex: 2;">
                 <option>Загрузка полного пула активов...</option>
             </select>
+            
             <button id="fav-btn" onclick="toggleFavorite()" style="background: transparent; border: 1px solid var(--border-color); color: var(--text); padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 1.2rem; transition: 0.2s;">⭐</button>
+            <button onclick="toggleWatchlistModal()" style="background: var(--panel); border: 1px solid var(--border-color); color: #fff; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📑 Мой список</button>
+            
+            <div id="watchlist-modal" style="display:none; position: absolute; top: 50px; right: 0; background: #1e222d; border: 1px solid var(--border-color); border-radius: 8px; width: 280px; max-height: 400px; overflow-y: auto; z-index: 1000; padding: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+                <div style="color: #F3BA2F; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px;">🪙 Криптовалюта</div>
+                <div id="wl-crypto" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 15px;"></div>
+                
+                <div style="color: #0ECB81; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px;">🏛️ Фондовый рынок</div>
+                <div id="wl-moex" style="display: flex; flex-direction: column; gap: 4px;"></div>
+            </div>
         </div>
         
-        <div id="watchlist-container" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 15px; padding: 5px 0;">
-            </div>
-
         <div class="trade-layout">
             <div class="trade-main">
                 <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px;">
@@ -327,12 +368,10 @@ HTML_CONTENT = """
         </div>
     </div>
 
-    <script>
-        const CRYPTO_TICKERS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "MATICUSDT"];
-        const MOEX_TICKERS = ["SBER", "LKOH", "GAZP", "YDEX", "TCSG", "ROSN", "NVTK", "TATN", "MGNT", "SNGS"];
-
+<script>
         let currentMarket = "crypto";
         let currentSymbol = "BTCUSDT"; 
+        let favorites = JSON.parse(localStorage.getItem('t_alpha_favs')) || ["BTCUSDT", "SBER"];
 
         // Переключение вкладок
         function openTab(tabId, btn) {
@@ -342,18 +381,83 @@ HTML_CONTENT = """
             btn.classList.add('active');
         }
 
-        // Обновление списков тикеров
-        function changeMarket(market) {
+        // Динамическая загрузка ВСЕГО пула активов с бэкенда
+        async function changeMarket(market) {
             currentMarket = market;
             const select = document.getElementById('symbol-select');
-            select.innerHTML = "";
-            const tickers = market === 'crypto' ? CRYPTO_TICKERS : MOEX_TICKERS;
-            tickers.forEach(t => {
-                let opt = document.createElement('option');
-                opt.value = t; opt.innerHTML = t;
-                select.appendChild(opt);
+            select.innerHTML = "<option>Синхронизация пула бумаг...</option>";
+            
+            try {
+                const response = await fetch(`/api/assets/${market}`);
+                const result = await response.json();
+                
+                if (result.status === "ok") {
+                    select.innerHTML = "";
+                    result.data.forEach(t => {
+                        let opt = document.createElement('option');
+                        opt.value = t; opt.innerHTML = t;
+                        if(t === currentSymbol) opt.selected = true;
+                        select.appendChild(opt);
+                    });
+                    
+                    // Если текущего символа нет в новом рынке, переключаемся на первый доступный
+                    if (!result.data.includes(currentSymbol)) {
+                        changeSymbol(result.data[0]);
+                    }
+                }
+            } catch (e) {
+                select.innerHTML = "<option>Ошибка загрузки пула</option>";
+            }
+            renderWatchlist();
+        }
+
+function toggleWatchlistModal() {
+            const modal = document.getElementById('watchlist-modal');
+            modal.style.display = modal.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleFavorite() {
+            const index = favorites.indexOf(currentSymbol);
+            if (index === -1) {
+                favorites.push(currentSymbol);
+            } else {
+                favorites.splice(index, 1);
+            }
+            localStorage.setItem('t_alpha_favs', JSON.stringify(favorites));
+            renderWatchlist();
+        }
+
+        function renderWatchlist() {
+            const c_container = document.getElementById('wl-crypto');
+            const m_container = document.getElementById('wl-moex');
+            const btn = document.getElementById('fav-btn');
+            if(!c_container || !btn) return;
+            
+            btn.style.color = favorites.includes(currentSymbol) ? 'var(--accent)' : 'var(--text)';
+            
+            c_container.innerHTML = "";
+            m_container.innerHTML = "";
+            
+            favorites.forEach(fav => {
+                const isCrypto = fav.includes("USDT");
+                const div = document.createElement('div');
+                div.innerHTML = fav;
+                div.style.cssText = `padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 4px; cursor: pointer; transition: 0.2s; color: #EAECEF; font-weight: 500;`;
+                div.onmouseover = () => div.style.background = 'rgba(255,255,255,0.1)';
+                div.onmouseout = () => div.style.background = 'rgba(255,255,255,0.03)';
+                
+                div.onclick = () => {
+                    const nextMarket = isCrypto ? 'crypto' : 'moex';
+                    document.getElementById('market-select').value = nextMarket;
+                    currentSymbol = fav;
+                    if (currentMarket !== nextMarket) changeMarket(nextMarket);
+                    else { document.getElementById('symbol-select').value = fav; changeSymbol(fav); }
+                    toggleWatchlistModal(); // Закрываем окно после клика
+                };
+                
+                if (isCrypto) c_container.appendChild(div);
+                else m_container.appendChild(div);
             });
-            changeSymbol(tickers[0]);
         }
 
         // Инициализация графиков Plotly
@@ -426,6 +530,41 @@ async function loadHistory(symbol) {
                 trendEl.style.color = currentPrice > result.data.sma ? "#0ECB81" : "#F6465D";
             }
         }
+async function loadLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                const result = await res.json();
+                if (result.status === "ok") {
+                    let htmlMini = "";
+                    let htmlFull = "";
+                    
+                    result.data.forEach(log => {
+                        const cssClass = log.action.includes('BUY') ? 'buy' : log.action.includes('SELL') ? 'sell' : '';
+                        const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#848E9C';
+                        
+                        // Мини-карточка для терминала
+                        htmlMini += `<div class="log-card ${cssClass}">
+                            <div style="color:#848E9C;font-size:0.75rem;">${log.time} | ${log.symbol}</div>
+                            <div style="font-weight:bold; color:${color}">${log.action} (${log.conf}%)</div>
+                            <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">${log.reason}</div>
+                        </div>`;
+                        
+                        // Полная карточка для вкладки ИИ
+                        htmlFull += `<div class="log-card ${cssClass}" style="margin-bottom: 12px; padding: 15px;">
+                            <div style="color:#848E9C;font-size:0.85rem;">${log.time} | ${log.symbol}</div>
+                            <div style="font-weight:bold; font-size:1.1rem; margin-bottom: 8px; color:${color}">${log.action} (Уверенность: ${log.conf}%)</div>
+                            <div style="font-size:0.9rem; color:#EAECEF; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; border-left: 2px solid #555;">
+                                ${log.state}
+                            </div>
+                            <div style="font-size:0.9rem;color:var(--accent);margin-top:8px;">💡 Вывод: ${log.reason}</div>
+                        </div>`;
+                    });
+                    
+                    document.getElementById('ai-logs-mini').innerHTML = htmlMini;
+                    document.getElementById('ai-logs-full').innerHTML = htmlFull;
+                }
+            } catch (e) {}
+        }
 
 async function loadPortfolio() {
             const response = await fetch(`/api/portfolio`);
@@ -475,9 +614,13 @@ async function loadPortfolio() {
         };
 
         // Запуск
-        changeMarket('crypto');
+        changeMarket('crypto').then(() => {
+            changeSymbol('BTCUSDT');
+        });
         loadPortfolio();
-        setInterval(loadPortfolio, 5000); 
+        setInterval(loadPortfolio, 5000);
+        loadLogs();
+        setInterval(loadLogs, 5000);
 
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
         ws.onmessage = function(event) {
