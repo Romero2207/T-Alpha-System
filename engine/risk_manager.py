@@ -9,7 +9,6 @@ class RiskManager:
         self.settings_file = "settings.json"
 
     def load_settings(self):
-        """Подтягиваем настройки, которые ты сохраняешь на сайте"""
         try:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, "r") as f:
@@ -19,25 +18,36 @@ class RiskManager:
         except:
             pass
 
-    def approve_signal(self, symbol, action, price, rsi):
-        # 1. Перед каждой проверкой обновляем настройки из файла
+    def approve_signal(self, symbol, action, price, inds):
         self.load_settings()
-
-        # 2. Определяем, какой рынок торгуется
         mode = self.crypto_mode if "USDT" in symbol else self.moex_mode
 
-        # 3. ЛОГИКА РИСКА
+        rsi = inds.get('rsi', 50)
+        # Если ATR вдруг не рассчитался, берем 1% от цены как базовую волатильность
+        atr = inds.get('atr') if inds.get('atr') and inds.get('atr') > 0 else (price * 0.01)
+
+        # Множители ATR (В агрессивном режиме даем цене больше пространства для маневра)
+        sl_mult = 2.0 if mode == "medium" else 1.5
+        rr_ratio = 2.5 if mode == "medium" else 2.0  # Риск/Прибыль 1:2.5 или 1:2.0
+
+        sl_price, tp_price = 0.0, 0.0
+
         if action == "BUY":
-            # В Low Risk бот боится покупать, если RSI выше 65. В Medium Risk (Агрессивно) он покупает вплоть до RSI 75.
             max_rsi = 75 if mode == "medium" else 65
             if rsi > max_rsi:
-                return False, f"БЛОК: RSI={rsi} слишком перегрет для покупки (Режим: {mode.upper()})"
+                return False, f"БЛОК: RSI={rsi} перегрет (Режим: {mode.upper()})", 0, 0
+
+            # Считаем уровни для лонга
+            sl_price = price - (atr * sl_mult)
+            tp_price = price + (atr * sl_mult * rr_ratio)
 
         elif action == "SELL":
-            # Для продажи (шорта) логика зеркальная
             min_rsi = 25 if mode == "medium" else 35
             if rsi < min_rsi:
-                return False, f"БЛОК: RSI={rsi} слишком перепродан для шорта (Режим: {mode.upper()})"
+                return False, f"БЛОК: RSI={rsi} перепродан (Режим: {mode.upper()})", 0, 0
 
-        # Если фильтры пройдены:
-        return True, "Риски в норме. Одобрено."
+            # Считаем уровни для шорта
+            sl_price = price + (atr * sl_mult)
+            tp_price = price - (atr * sl_mult * rr_ratio)
+
+        return True, f"Одобрено. Risk/Reward 1:{rr_ratio}", round(sl_price, 4), round(tp_price, 4)

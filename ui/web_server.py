@@ -18,6 +18,7 @@ app = FastAPI()
 system_bus = None
 bybit_client = HTTP(testnet=False)
 
+
 # ИСПРАВЛЕНИЕ: Вместо жесткого пула делаем динамический эндпоинт для ВСЕХ бумаг
 @app.get("/api/assets/{market}")
 async def get_all_assets(market: str):
@@ -26,7 +27,8 @@ async def get_all_assets(market: str):
             # Запрашиваем вообще все линейные USDT пары с Bybit
             res = bybit_client.get_instruments_info(category="linear")
             if res['retCode'] == 0:
-                symbols = sorted([x['symbol'] for x in res['result']['list'] if x['quoteCoin'] == 'USDT' and not x['symbol'].startswith('1000')])
+                symbols = sorted([x['symbol'] for x in res['result']['list'] if
+                                  x['quoteCoin'] == 'USDT' and not x['symbol'].startswith('1000')])
                 return {"status": "ok", "data": symbols}
         else:
             # Запрашиваем абсолютно все акции с главного режима торгов Мосбиржи (TQBR)
@@ -37,6 +39,7 @@ async def get_all_assets(market: str):
     except Exception as e:
         return {"status": "error", "message": str(e)}
     return {"status": "error", "data": []}
+
 
 @app.get("/api/portfolio")
 async def get_portfolio():
@@ -109,13 +112,17 @@ async def get_logs():
                     "state": state_text,
                     "action": dec.get("action", "HOLD"),
                     "reason": dec.get("reason", "Анализ рынка..."),
-                    "conf": dec.get("confidence", 0)
+                    "conf": dec.get("confidence", 0),
+                    "sl": dec.get("sl", 0),  #
+                    "tp": dec.get("tp", 0)  #
                 })
             except:
                 pass
         return {"status": "ok", "data": logs}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
 @app.post("/api/settings")
 async def save_settings(request: Request):
     """API для сохранения уровня риска с сайта"""
@@ -126,6 +133,7 @@ async def save_settings(request: Request):
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
 
 @app.get("/api/history/{symbol}")
 async def get_history(symbol: str):
@@ -227,8 +235,8 @@ HTML_CONTENT = """
         .tab-btn:hover { color: #fff; }
         .tab-btn.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
 
-        .tab-content { display: none; flex: 1; padding: 15px; overflow-y: auto; }
-        .tab-content.active { display: flex; flex-direction: column; gap: 15px; }
+        .tab-content { display: none !important; }
+        .tab-content.active { display: flex !important; flex-direction: column; gap: 15px; flex: 1; padding: 15px; overflow-y: auto; }
 
         .panel { background-color: var(--panel); border: 1px solid var(--border-color); border-radius: 8px; padding: 15px; }
         .panel-title { font-weight: bold; margin-bottom: 15px; color: #fff; border-bottom: 1px solid var(--border-color); padding-bottom: 10px;}
@@ -392,12 +400,24 @@ HTML_CONTENT = """
         let currentSymbol = "BTCUSDT"; 
         let favorites = JSON.parse(localStorage.getItem('t_alpha_favs')) || ["BTCUSDT", "SBER"];
 
-        // Переключение вкладок
+// ИСПРАВЛЕНИЕ: Умное переключение вкладок с сохранением их внутреннего дизайна
         function openTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(t => {
+                t.classList.remove('active');
+                t.style.display = 'none'; // Явно принудительно скрываем
+            });
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.getElementById(tabId).classList.add('active');
+            
+            const activeTab = document.getElementById(tabId);
+            activeTab.classList.add('active');
             btn.classList.add('active');
+            
+            // Если это первая вкладка (обзор портфеля), включаем ей сетку Grid. Для остальных — Flex.
+            if (tabId === 'tab-dashboard') {
+                activeTab.style.setProperty('display', 'grid', 'important');
+            } else {
+                activeTab.style.setProperty('display', 'flex', 'important');
+            }
         }
 
         // Динамическая загрузка ВСЕГО пула активов с бэкенда
@@ -557,22 +577,25 @@ async function loadLogs() {
                     let htmlMini = "";
                     let htmlFull = "";
                     
-                    result.data.forEach(log => {
+result.data.forEach(log => {
                         const cssClass = log.action.includes('BUY') ? 'buy' : log.action.includes('SELL') ? 'sell' : '';
                         const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#848E9C';
                         
-                        // Мини-карточка для терминала
+                        // Добавляем блок TP/SL если они есть
+                        const slTpHtml = log.sl > 0 ? `<div style="margin-top:5px; padding: 4px; border-radius: 4px; background: rgba(0,0,0,0.3); font-family: monospace;">🎯 TP: <span style="color:#0ECB81">${log.tp}</span> | 🛑 SL: <span style="color:#F6465D">${log.sl}</span></div>` : '';
+                        
                         htmlMini += `<div class="log-card ${cssClass}">
                             <div style="color:#848E9C;font-size:0.75rem;">${log.time} | ${log.symbol}</div>
                             <div style="font-weight:bold; color:${color}">${log.action} (${log.conf}%)</div>
+                            ${slTpHtml}
                             <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">${log.reason}</div>
                         </div>`;
                         
-                        // Полная карточка для вкладки ИИ
                         htmlFull += `<div class="log-card ${cssClass}" style="margin-bottom: 12px; padding: 15px;">
                             <div style="color:#848E9C;font-size:0.85rem;">${log.time} | ${log.symbol}</div>
                             <div style="font-weight:bold; font-size:1.1rem; margin-bottom: 8px; color:${color}">${log.action} (Уверенность: ${log.conf}%)</div>
-                            <div style="font-size:0.9rem; color:#EAECEF; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; border-left: 2px solid #555;">
+                            ${slTpHtml}
+                            <div style="font-size:0.9rem; color:#EAECEF; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; border-left: 2px solid #555; margin-top: 8px;">
                                 ${log.state}
                             </div>
                             <div style="font-size:0.9rem;color:var(--accent);margin-top:8px;">💡 Вывод: ${log.reason}</div>
@@ -642,26 +665,36 @@ async function loadPortfolio() {
         setInterval(loadLogs, 5000);
 
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
-        ws.onmessage = function(event) {
+ws.onmessage = function(event) {
             const msg = JSON.parse(event.data);
             if (msg.event === "TRADE_SIGNAL") {
                 const data = msg.data;
                 const cssClass = data.action.includes('BUY') ? 'buy' : data.action.includes('SELL') ? 'sell' : '';
+                const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#fff';
+                
+                const slTpHtml = data.sl > 0 ? `<div style="margin-top:4px; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 4px; font-family: monospace; font-size: 0.8rem;">🎯 TP: <span style="color:#0ECB81">${data.tp}</span> | 🛑 SL: <span style="color:#F6465D">${data.sl}</span></div>` : '';
+
                 const html = `<div class="log-card ${cssClass}">
                                   <div style="color:#848E9C;font-size:0.75rem;">${new Date().toLocaleTimeString()} | ${data.symbol}</div>
-                                  <div style="font-weight:bold; color:${cssClass==='buy'?'#0ECB81':cssClass==='sell'?'#F6465D':'#fff'}">${data.action}</div>
+                                  <div style="font-weight:bold; color:${color}">${data.action}</div>
+                                  ${slTpHtml}
                                   <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">Логика: ${data.reason || "AI Signal"}</div>
                               </div>`;
-
-                // Добавляем логи в оба контейнера (мини на вкладке торговли, полный на вкладке ИИ)
+                
                 const miniBox = document.getElementById('ai-logs-mini');
                 const fullBox = document.getElementById('ai-logs-full');
+                if(miniBox) { miniBox.insertAdjacentHTML('afterbegin', html); if(miniBox.children.length > 10) miniBox.removeChild(miniBox.lastChild); }
+                if(fullBox) { fullBox.insertAdjacentHTML('afterbegin', html); if(fullBox.children.length > 50) fullBox.removeChild(fullBox.lastChild); }
 
-                miniBox.insertAdjacentHTML('afterbegin', html);
-                fullBox.insertAdjacentHTML('afterbegin', html);
-
-                if(miniBox.children.length > 10) miniBox.removeChild(miniBox.lastChild);
-                if(fullBox.children.length > 50) fullBox.removeChild(fullBox.lastChild);
+                // РИСУЕМ ЛИНИИ ТЕЙКА И СТОПА НА ГРАФИКЕ (Только если открыт нужный тикер)
+                if (data.sl > 0 && data.symbol === currentSymbol && layout.shapes) {
+                    // Удаляем старые линии SL/TP перед отрисовкой новых
+                    layout.shapes = layout.shapes.filter(s => s.name !== 'sltp');
+                    
+                    layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.sl, y1: data.sl, line: {color: '#F6465D', width: 2, dash: 'dash'} });
+                    layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.tp, y1: data.tp, line: {color: '#0ECB81', width: 2, dash: 'dash'} });
+                    Plotly.relayout(domElement, { shapes: layout.shapes });
+                }
             }
         };
     </script>

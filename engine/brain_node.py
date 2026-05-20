@@ -104,21 +104,27 @@ class BrainNode:
             reason = decision.get('reason', 'Анализ завершен')
             confidence = decision.get('confidence', 0)
 
-            # 3. Пропускаем решение через Risk Manager
-            approved, rm_reason = self.risk_manager.approve_signal(symbol, action, price, inds['rsi'])
+            # 3. Пропускаем решение через Risk Manager (передаем все индикаторы, включая ATR)
+            approved, rm_reason, sl, tp = self.risk_manager.approve_signal(symbol, action, price, inds)
 
             if not approved and action != "HOLD":
                 action = f"HOLD (Блок Риск-менеджера: {action})"
                 reason = rm_reason
+                sl, tp = 0, 0
+            elif approved and action != "HOLD":
+                reason = f"{reason} | {rm_reason}"  # Добавляем к мыслям ИИ вердикт Риск-менеджера
 
             signal = {
                 "symbol": symbol,
                 "action": action,
                 "price": price,
                 "confidence": confidence,
-                "reason": reason
+                "reason": reason,
+                "sl": sl,  # <-- Передаем Stop Loss
+                "tp": tp  # <-- Передаем Take Profit
             }
 
+            # 4. Запись мыслей в базу
             # 4. Запись мыслей в базу (для сайта)
             state_desc = f"[{market.upper()}] Аномалия: {symbol}. Цена: {price}. Паттерн: {inds['pattern']}"
             await loop.run_in_executor(None, self.save_to_db, state_desc, signal)
