@@ -46,13 +46,12 @@ async def get_portfolio():
     try:
         conn = get_connection()
         p_df = pd.read_sql_query("SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0", conn)
-        h_df = pd.read_sql_query(
-            "SELECT timestamp, symbol, action, price, total_value FROM trade_history ORDER BY id DESC LIMIT 20", conn)
+        # ИСПРАВЛЕНИЕ: Добавили выборку поля 'amount' (объем сделки) из истории
+        h_df = pd.read_sql_query("SELECT timestamp, symbol, action, price, amount, total_value FROM trade_history ORDER BY id DESC LIMIT 20", conn)
         conn.close()
 
         fiat = p_df[p_df['symbol'].isin(['USDT', 'RUB'])].to_dict('records')
 
-        # Расчет актуальной прибыли/убытка (PnL)
         assets = []
         for _, row in p_df[~p_df['symbol'].isin(['USDT', 'RUB'])].iterrows():
             sym = row['symbol']
@@ -61,19 +60,15 @@ async def get_portfolio():
             live_price = entry
 
             try:
-                # Пытаемся получить живую цену для точного подсчета PnL
                 if "USDT" in sym:
                     res = bybit_client.get_tickers(category="linear", symbol=sym)
                     live_price = float(res['result']['list'][0]['lastPrice'])
                 else:
                     url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{sym}.json?iss.only=marketdata"
                     res = requests.get(url, timeout=2).json()
-                    live_price = float(
-                        res['marketdata']['data'][0][res['marketdata']['columns'].index('LAST')] or entry)
-            except:
-                pass
+                    live_price = float(res['marketdata']['data'][0][res['marketdata']['columns'].index('LAST')] or entry)
+            except: pass
 
-            # Считаем профит
             pnl = (live_price - entry) * amt
             pnl_pct = ((live_price - entry) / entry) * 100 if entry > 0 else 0
 
@@ -123,17 +118,15 @@ async def get_logs():
         return {"status": "error", "message": str(e)}
 
 
-@app.post("/api/settings")
-async def save_settings(request: Request):
-    """API для сохранения уровня риска с сайта"""
+@app.get("/api/settings")
+async def get_settings():
+    """Отдаем текущие настройки риска фронтенду при обновлении страницы"""
     try:
-        data = await request.json()
-        with open("settings.json", "w") as f:
-            json.dump(data, f)
-        return {"status": "ok"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
+        if os.path.exists("settings.json"):
+            with open("settings.json", "r") as f:
+                return json.load(f)
+    except: pass
+    return {"crypto": "low", "moex": "low"}
 
 @app.get("/api/history/{symbol}")
 async def get_history(symbol: str):
@@ -146,10 +139,15 @@ async def get_history(symbol: str):
             df = pd.DataFrame(klines, columns=['ts', 'o', 'h', 'l', 'c', 'v', 't'])
             df['ts'] = pd.to_numeric(df['ts'])
         else:
-            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?interval=10&limit=200"
+            from datetime import datetime, timedelta
+            # Запрашиваем историю только за последние 14 дней, чтобы не получать цены 2014 года
+            start_date = (datetime.now() - timedelta(days=14)).strftime('%Y-%m-%d')
+            url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{symbol}/candles.json?interval=10&from={start_date}"
             res = requests.get(url, timeout=5).json()
             candles = res.get('candles', {}).get('data', [])
             if not candles: return {"status": "error"}
+            # Оставляем только свежие 200 свечей, если их пришло больше
+            candles = candles[-200:]
             df = pd.DataFrame(candles, columns=res['candles']['columns'])
             df = df.rename(columns={'begin': 'ts', 'open': 'o', 'high': 'h', 'low': 'l', 'close': 'c', 'volume': 'v'})
             df['ts'] = df['ts'].apply(lambda x: int(time.mktime(time.strptime(x, "%Y-%m-%d %H:%M:%S"))) * 1000)
@@ -278,20 +276,20 @@ HTML_CONTENT = """
         <button class="tab-btn" onclick="openTab('tab-ai', this)">Управление ИИ</button>
     </div>
 
-<div id="tab-dashboard" class="tab-content active">
+    <div id="tab-dashboard" class="tab-content active">
         <div class="dash-grid">
             <div class="panel">
                 <div class="panel-title" style="color: #F3BA2F;">🪙 Портфель: Криптовалюта</div>
                 <div style="font-size: 1.2rem; margin-bottom: 10px;">Свободно: <strong id="bal-usdt" style="color:#fff;">$0.00</strong></div>
-                <table id="crypto-assets"><tr><th>Токен</th><th>Объем</th><th>Цена входа</th></tr></table>
-                <div style="margin-top: 15px; color:#848E9C;">Последние сделки:</div>
+                <table id="crypto-assets"><tr><th>Токен</th><th>Объем</th><th>Цена входа</th><th>PnL</th></tr></table>
+                <div style="margin-top: 20px; font-weight: bold; color:#848E9C; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 5px;">📜 Журнал ордеров Крипты:</div>
                 <table id="crypto-history"></table>
             </div>
             <div class="panel">
                 <div class="panel-title" style="color: #0ECB81;">🏛️ Портфель: Московская Биржа</div>
                 <div style="font-size: 1.2rem; margin-bottom: 10px;">Свободно: <strong id="bal-rub" style="color:#fff;">0.00 ₽</strong></div>
-                <table id="moex-assets"><tr><th>Акция</th><th>Объем</th><th>Цена входа</th></tr></table>
-                <div style="margin-top: 15px; color:#848E9C;">Последние сделки:</div>
+                <table id="moex-assets"><tr><th>Акция</th><th>Объем</th><th>Цена входа</th><th>PnL</th></tr></table>
+                <div style="margin-top: 20px; font-weight: bold; color:#848E9C; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 5px;">📜 Журнал ордеров MOEX:</div>
                 <table id="moex-history"></table>
             </div>
         </div>
@@ -306,19 +304,19 @@ HTML_CONTENT = """
             <select id="symbol-select" onchange="changeSymbol(this.value)" style="flex: 2;">
                 <option>Загрузка полного пула активов...</option>
             </select>
-            
+
             <button id="fav-btn" onclick="toggleFavorite()" style="background: transparent; border: 1px solid var(--border-color); color: var(--text); padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 1.2rem; transition: 0.2s;">⭐</button>
             <button onclick="toggleWatchlistModal()" style="background: var(--panel); border: 1px solid var(--border-color); color: #fff; padding: 8px 12px; border-radius: 4px; cursor: pointer;">📑 Мой список</button>
-            
+
             <div id="watchlist-modal" style="display:none; position: absolute; top: 50px; right: 0; background: #1e222d; border: 1px solid var(--border-color); border-radius: 8px; width: 280px; max-height: 400px; overflow-y: auto; z-index: 1000; padding: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
                 <div style="color: #F3BA2F; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px;">🪙 Криптовалюта</div>
                 <div id="wl-crypto" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 15px;"></div>
-                
+
                 <div style="color: #0ECB81; font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 5px;">🏛️ Фондовый рынок</div>
                 <div id="wl-moex" style="display: flex; flex-direction: column; gap: 4px;"></div>
             </div>
         </div>
-        
+
         <div class="trade-layout">
             <div class="trade-main">
                 <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:5px;">
@@ -343,7 +341,9 @@ HTML_CONTENT = """
         </div>
     </div>
 
-<div class="panel">
+    <div id="tab-ai" class="tab-content">
+        <div class="dash-grid">
+            <div class="panel">
                 <div class="panel-title">⚙️ Настройки Риск-Менеджмента</div>
                 <div style="margin-bottom: 20px;">
                     <label style="color:var(--text);">Стратегия Крипторынка:</label><br>
@@ -361,13 +361,42 @@ HTML_CONTENT = """
                 </div>
                 <button onclick="saveSettings(this)" style="margin-top: 20px; padding: 10px; background:var(--accent); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition: 0.3s;">Сохранить настройки</button>
             </div>
-                <script>
-                    // Добавь эту функцию куда-нибудь в блок <script>
-                    function saveSettings(btn) {
+
+            <div class="panel" style="height: calc(100vh - 200px); display:flex; flex-direction:column;">
+                <div class="panel-title">🧠 Подробный Журнал Мыслей ИИ</div>
+                <div class="log-container" id="ai-logs-full"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentMarket = "crypto";
+        let currentSymbol = "BTCUSDT"; 
+        let favorites = JSON.parse(localStorage.getItem('t_alpha_favs')) || ["BTCUSDT", "SBER"];
+
+        // Умное переключение вкладок с сохранением их внутреннего дизайна
+        function openTab(tabId, btn) {
+            document.querySelectorAll('.tab-content').forEach(t => {
+                t.classList.remove('active');
+                t.style.display = 'none';
+            });
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+
+            const activeTab = document.getElementById(tabId);
+            activeTab.classList.add('active');
+            btn.classList.add('active');
+
+            if (tabId === 'tab-dashboard') {
+                activeTab.style.setProperty('display', 'grid', 'important');
+            } else {
+                activeTab.style.setProperty('display', 'flex', 'important');
+            }
+        }
+
+        function saveSettings(btn) {
             const cryptoMode = document.getElementById('setting-crypto').value;
             const moexMode = document.getElementById('setting-moex').value;
-            
-            // Отправляем данные на бэкенд
+
             fetch('/api/settings', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -385,39 +414,14 @@ HTML_CONTENT = """
                 }
             });
         }
-                </script>
-            </div>
 
-            <div class="panel" style="height: calc(100vh - 200px); display:flex; flex-direction:column;">
-                <div class="panel-title">🧠 Подробный Журнал Мыслей ИИ</div>
-                <div class="log-container" id="ai-logs-full"></div>
-            </div>
-        </div>
-    </div>
-
-<script>
-        let currentMarket = "crypto";
-        let currentSymbol = "BTCUSDT"; 
-        let favorites = JSON.parse(localStorage.getItem('t_alpha_favs')) || ["BTCUSDT", "SBER"];
-
-// ИСПРАВЛЕНИЕ: Умное переключение вкладок с сохранением их внутреннего дизайна
-        function openTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(t => {
-                t.classList.remove('active');
-                t.style.display = 'none'; // Явно принудительно скрываем
-            });
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            
-            const activeTab = document.getElementById(tabId);
-            activeTab.classList.add('active');
-            btn.classList.add('active');
-            
-            // Если это первая вкладка (обзор портфеля), включаем ей сетку Grid. Для остальных — Flex.
-            if (tabId === 'tab-dashboard') {
-                activeTab.style.setProperty('display', 'grid', 'important');
-            } else {
-                activeTab.style.setProperty('display', 'flex', 'important');
-            }
+        async function loadSettingsUI() {
+            try {
+                const res = await fetch('/api/settings');
+                const data = await res.json();
+                if (data.crypto) document.getElementById('setting-crypto').value = data.crypto;
+                if (data.moex) document.getElementById('setting-moex').value = data.moex;
+            } catch (e) {}
         }
 
         // Динамическая загрузка ВСЕГО пула активов с бэкенда
@@ -425,11 +429,11 @@ HTML_CONTENT = """
             currentMarket = market;
             const select = document.getElementById('symbol-select');
             select.innerHTML = "<option>Синхронизация пула бумаг...</option>";
-            
+
             try {
                 const response = await fetch(`/api/assets/${market}`);
                 const result = await response.json();
-                
+
                 if (result.status === "ok") {
                     select.innerHTML = "";
                     result.data.forEach(t => {
@@ -438,8 +442,7 @@ HTML_CONTENT = """
                         if(t === currentSymbol) opt.selected = true;
                         select.appendChild(opt);
                     });
-                    
-                    // Если текущего символа нет в новом рынке, переключаемся на первый доступный
+
                     if (!result.data.includes(currentSymbol)) {
                         changeSymbol(result.data[0]);
                     }
@@ -450,7 +453,7 @@ HTML_CONTENT = """
             renderWatchlist();
         }
 
-function toggleWatchlistModal() {
+        function toggleWatchlistModal() {
             const modal = document.getElementById('watchlist-modal');
             modal.style.display = modal.style.display === 'none' ? 'block' : 'none';
         }
@@ -471,12 +474,12 @@ function toggleWatchlistModal() {
             const m_container = document.getElementById('wl-moex');
             const btn = document.getElementById('fav-btn');
             if(!c_container || !btn) return;
-            
+
             btn.style.color = favorites.includes(currentSymbol) ? 'var(--accent)' : 'var(--text)';
-            
+
             c_container.innerHTML = "";
             m_container.innerHTML = "";
-            
+
             favorites.forEach(fav => {
                 const isCrypto = fav.includes("USDT");
                 const div = document.createElement('div');
@@ -484,58 +487,51 @@ function toggleWatchlistModal() {
                 div.style.cssText = `padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 4px; cursor: pointer; transition: 0.2s; color: #EAECEF; font-weight: 500;`;
                 div.onmouseover = () => div.style.background = 'rgba(255,255,255,0.1)';
                 div.onmouseout = () => div.style.background = 'rgba(255,255,255,0.03)';
-                
+
                 div.onclick = () => {
                     const nextMarket = isCrypto ? 'crypto' : 'moex';
                     document.getElementById('market-select').value = nextMarket;
                     currentSymbol = fav;
                     if (currentMarket !== nextMarket) changeMarket(nextMarket);
                     else { document.getElementById('symbol-select').value = fav; changeSymbol(fav); }
-                    toggleWatchlistModal(); // Закрываем окно после клика
+                    toggleWatchlistModal();
                 };
-                
+
                 if (isCrypto) c_container.appendChild(div);
                 else m_container.appendChild(div);
             });
         }
 
-        // Инициализация графиков Plotly
         const domElement = document.getElementById('tvchart');
         const layout = {
             plot_bgcolor: 'transparent', paper_bgcolor: 'transparent',
             margin: {t: 10, l: 50, r: 20, b: 40},
-            // ИСПРАВЛЕНИЕ: type: 'category' убирает пустые дыры на графике
             xaxis: { showgrid: false, color: '#848E9C', type: 'category', nticks: 15, tickangle: -45 }, 
             yaxis: { showgrid: true, gridcolor: '#2B3139', color: '#848E9C', fixedrange: false },
             dragmode: 'pan', hovermode: 'x unified', shapes: []
         };
 
-async function loadHistory(symbol) {
+        async function loadHistory(symbol) {
             document.getElementById('active-symbol').innerText = symbol;
-            
-            // ИСПРАВЛЕНИЕ КЭША: Добавляем ?t=... чтобы браузер всегда качал свежий график
             const response = await fetch(`/api/history/${symbol}?t=${Date.now()}`);
             const result = await response.json();
-            
+
             if (result.status === "ok") {
                 const fiatSign = symbol.includes("USDT") ? "$" : "₽";
                 const currentPrice = result.data.close[result.data.close.length - 1];
-                
-                // Главный график свечей
+
                 const traceMain = {
                     x: result.data.time, close: result.data.close, high: result.data.high, low: result.data.low, open: result.data.open,
                     type: 'candlestick', name: symbol,
                     increasing: {line: {color: '#0ECB81'}}, decreasing: {line: {color: '#F6465D'}}
                 };
 
-                // Индикатор: Полосы Боллинджера (Верх)
                 const traceBBHigh = {
                     x: result.data.time, y: result.data.bb_high, type: 'scatter', mode: 'lines',
                     line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, hoverinfo: 'skip', name: 'BB High',
                     connectgaps: true
                 };
 
-                // Индикатор: Полосы Боллинджера (Низ)
                 const traceBBLow = {
                     x: result.data.time, y: result.data.bb_low, type: 'scatter', mode: 'lines',
                     line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, fill: 'tonexty', fillcolor: 'rgba(255,255,255,0.03)', hoverinfo: 'skip', name: 'BB Low',
@@ -547,50 +543,47 @@ async function loadHistory(symbol) {
                 result.data.levels.forEach(lvl => {
                     layout.shapes.push({ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: lvl.price, y1: lvl.price, line: {color: lvl.type === 'support' ? 'rgba(14, 203, 129, 0.3)' : 'rgba(246, 70, 93, 0.3)', width: 1, dash: 'dot'} });
                 });
-                
-                // ИСПРАВЛЕНИЕ МАСШТАБА: Заставляем график сам подстроить зум (autorange)
+
                 layout.xaxis.autorange = true;
                 layout.yaxis.autorange = true;
-                
-                // Используем Plotly.react вместо newPlot для плавного обновления без багов
+
                 Plotly.react(domElement, [traceBBHigh, traceBBLow, traceMain], layout, {responsive: true, displayModeBar: true, scrollZoom: true});
-                
+
                 document.getElementById('active-price').innerText = fiatSign + currentPrice.toFixed(2);
                 document.getElementById('conn-status').innerText = '🟢 Ядро подключено (Live)';
 
-                // X-Ray
                 document.getElementById('xray-poc').innerText = fiatSign + result.data.poc.toFixed(2);
                 document.getElementById('xray-rsi').innerText = result.data.rsi;
                 const rsiEl = document.getElementById('xray-rsi-verdict');
                 rsiEl.innerText = result.data.rsi < 35 ? "🟢 ПОКУПКА" : result.data.rsi > 65 ? "🔴 ПЕРЕГРЕВ" : "⚪ НЕЙТРАЛЬНО";
-                
+
                 const trendEl = document.getElementById('xray-sma');
                 trendEl.innerText = currentPrice > result.data.sma ? "📈 UPTREND" : "📉 DOWNTREND";
                 trendEl.style.color = currentPrice > result.data.sma ? "#0ECB81" : "#F6465D";
             }
         }
-async function loadLogs() {
+
+        async function loadLogs() {
             try {
                 const res = await fetch('/api/logs');
                 const result = await res.json();
                 if (result.status === "ok") {
                     let htmlMini = "";
                     let htmlFull = "";
-                    
-result.data.forEach(log => {
+
+                    result.data.forEach(log => {
                         const cssClass = log.action.includes('BUY') ? 'buy' : log.action.includes('SELL') ? 'sell' : '';
                         const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#848E9C';
-                        
-                        // Добавляем блок TP/SL если они есть
+
                         const slTpHtml = log.sl > 0 ? `<div style="margin-top:5px; padding: 4px; border-radius: 4px; background: rgba(0,0,0,0.3); font-family: monospace;">🎯 TP: <span style="color:#0ECB81">${log.tp}</span> | 🛑 SL: <span style="color:#F6465D">${log.sl}</span></div>` : '';
-                        
+
                         htmlMini += `<div class="log-card ${cssClass}">
                             <div style="color:#848E9C;font-size:0.75rem;">${log.time} | ${log.symbol}</div>
                             <div style="font-weight:bold; color:${color}">${log.action} (${log.conf}%)</div>
                             ${slTpHtml}
                             <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">${log.reason}</div>
                         </div>`;
-                        
+
                         htmlFull += `<div class="log-card ${cssClass}" style="margin-bottom: 12px; padding: 15px;">
                             <div style="color:#848E9C;font-size:0.85rem;">${log.time} | ${log.symbol}</div>
                             <div style="font-weight:bold; font-size:1.1rem; margin-bottom: 8px; color:${color}">${log.action} (Уверенность: ${log.conf}%)</div>
@@ -601,47 +594,55 @@ result.data.forEach(log => {
                             <div style="font-size:0.9rem;color:var(--accent);margin-top:8px;">💡 Вывод: ${log.reason}</div>
                         </div>`;
                     });
-                    
+
                     document.getElementById('ai-logs-mini').innerHTML = htmlMini;
                     document.getElementById('ai-logs-full').innerHTML = htmlFull;
                 }
             } catch (e) {}
         }
 
-async function loadPortfolio() {
+        async function loadPortfolio() {
             const response = await fetch(`/api/portfolio`);
             const result = await response.json();
             if (result.status === "ok") {
-                // Балансы фиата
                 result.fiat.forEach(f => { 
                     if(f.symbol === 'USDT') document.getElementById('bal-usdt').innerText = '$' + f.amount.toFixed(2);
                     if(f.symbol === 'RUB') document.getElementById('bal-rub').innerText = f.amount.toFixed(2) + ' ₽';
                 });
 
-// Разделяем активы (Теперь с PnL!)
                 let cAssets = "<tr><th>Токен</th><th>Объем</th><th>Вход</th><th>PnL</th></tr>";
                 let mAssets = "<tr><th>Акция</th><th>Объем</th><th>Вход</th><th>PnL</th></tr>";
-                
+
                 result.assets.forEach(a => { 
                     const pnlColor = a.pnl >= 0 ? '#0ECB81' : '#F6465D';
                     const pnlSign = a.pnl >= 0 ? '+' : '';
                     const pnlText = `<span style="color:${pnlColor}; font-weight:bold;">${pnlSign}${a.pnl} (${pnlSign}${a.pnl_pct}%)</span>`;
-                    
+
                     if(a.symbol.includes('USDT')) {
                         cAssets += `<tr><td style="color:#F3BA2F;">${a.symbol}</td><td>${a.amount.toFixed(4)}</td><td>$${a.entry.toFixed(2)}</td><td>${pnlText}</td></tr>`;
                     } else {
                         mAssets += `<tr><td style="color:#0ECB81;">${a.symbol}</td><td>${a.amount.toFixed(0)}</td><td>${a.entry.toFixed(2)} ₽</td><td>${pnlText}</td></tr>`;
                     }
                 });
-                
+
                 document.getElementById('crypto-assets').innerHTML = cAssets;
                 document.getElementById('moex-assets').innerHTML = mAssets;
 
-                // Разделяем историю
-                let cHist = "", mHist = "";
+                let cHist = "<tr><th>Время</th><th>Сигнал</th><th>Цена</th><th>Объем</th><th>Всего</th></tr>";
+                let mHist = "<tr><th>Время</th><th>Сигнал</th><th>Цена</th><th>Объем</th><th>Всего</th></tr>";
+
                 result.history.forEach(h => { 
                     const color = h.action.includes("BUY") ? "var(--green)" : "var(--red)";
-                    const row = `<tr><td style="color:#848E9C">${h.timestamp.split(' ')[1]}</td><td>${h.symbol}</td><td style="color:${color}; font-weight:bold;">${h.action}</td><td>${h.price}</td></tr>`;
+                    const fiatSign = h.symbol.includes("USDT") ? "$" : "₽";
+
+                    const row = `<tr>
+                        <td style="color:#848E9C">${h.timestamp.split(' ')[1]}</td>
+                        <td><strong style="color:${color}">${h.action}</strong><br><span style="font-size:0.75rem; color:#848E9C">${h.symbol}</span></td>
+                        <td style="font-family:monospace">${fiatSign}${h.price.toFixed(2)}</td>
+                        <td style="color:#fff; font-family:monospace">${h.amount.toFixed(4)}</td>
+                        <td style="font-weight:bold; font-family:monospace">${fiatSign}${h.total_value.toFixed(2)}</td>
+                    </tr>`;
+
                     if(h.symbol.includes('USDT')) cHist += row; else mHist += row;
                 });
                 document.getElementById('crypto-history').innerHTML = cHist;
@@ -655,7 +656,7 @@ async function loadPortfolio() {
             loadHistory(currentSymbol);
         };
 
-        // Запуск
+        loadSettingsUI();
         changeMarket('crypto').then(() => {
             changeSymbol('BTCUSDT');
         });
@@ -665,13 +666,13 @@ async function loadPortfolio() {
         setInterval(loadLogs, 5000);
 
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
-ws.onmessage = function(event) {
+        ws.onmessage = function(event) {
             const msg = JSON.parse(event.data);
             if (msg.event === "TRADE_SIGNAL") {
                 const data = msg.data;
                 const cssClass = data.action.includes('BUY') ? 'buy' : data.action.includes('SELL') ? 'sell' : '';
                 const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#fff';
-                
+
                 const slTpHtml = data.sl > 0 ? `<div style="margin-top:4px; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 4px; font-family: monospace; font-size: 0.8rem;">🎯 TP: <span style="color:#0ECB81">${data.tp}</span> | 🛑 SL: <span style="color:#F6465D">${data.sl}</span></div>` : '';
 
                 const html = `<div class="log-card ${cssClass}">
@@ -680,17 +681,14 @@ ws.onmessage = function(event) {
                                   ${slTpHtml}
                                   <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">Логика: ${data.reason || "AI Signal"}</div>
                               </div>`;
-                
+
                 const miniBox = document.getElementById('ai-logs-mini');
                 const fullBox = document.getElementById('ai-logs-full');
                 if(miniBox) { miniBox.insertAdjacentHTML('afterbegin', html); if(miniBox.children.length > 10) miniBox.removeChild(miniBox.lastChild); }
                 if(fullBox) { fullBox.insertAdjacentHTML('afterbegin', html); if(fullBox.children.length > 50) fullBox.removeChild(fullBox.lastChild); }
 
-                // РИСУЕМ ЛИНИИ ТЕЙКА И СТОПА НА ГРАФИКЕ (Только если открыт нужный тикер)
                 if (data.sl > 0 && data.symbol === currentSymbol && layout.shapes) {
-                    // Удаляем старые линии SL/TP перед отрисовкой новых
                     layout.shapes = layout.shapes.filter(s => s.name !== 'sltp');
-                    
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.sl, y1: data.sl, line: {color: '#F6465D', width: 2, dash: 'dash'} });
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.tp, y1: data.tp, line: {color: '#0ECB81', width: 2, dash: 'dash'} });
                     Plotly.relayout(domElement, { shapes: layout.shapes });
