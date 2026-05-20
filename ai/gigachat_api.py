@@ -12,9 +12,14 @@ load_dotenv()
 
 class AIEngine:
     def __init__(self):
-        self.credentials = os.getenv("GIGACHAT_CREDENTIALS", "")
-        self.v_db = get_vector_db()
+        # ИСПРАВЛЕНИЕ: Теперь берем ключ напрямую из файла .env
+        self.credentials = os.getenv("GIGACHAT_CREDENTIALS")
+        self.auth_token = ""
+        self.token_expires = 0
 
+        # Если ключ не найден, выводим предупреждение
+        if not self.credentials:
+            print("⚠️ [GigaChat] Ключ не найден в .env! ИИ отключен.")
     def analyze_market_state(self, symbol, current_price, current_volume, indicators):
         # Базовые индикаторы
         rsi = indicators.get('rsi', 50.0)

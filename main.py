@@ -1,15 +1,24 @@
 import asyncio
 import sys
+import os
 import requests
 import uvicorn
 from pybit.unified_trading import HTTP
+from dotenv import load_dotenv
+
 from core.event_bus import SystemEventBus
 from engine.data_collector import AsyncDataCollector
 from engine.brain_node import BrainNode
 import ui.web_server as web_ui
 from core.memory import get_connection
+from core.notifier import TelegramNotifier
+
+load_dotenv()
 
 bybit_scanner = HTTP(testnet=False)
+
+# ВОТ ЭТА СТРОЧКА РЕШИТ ПРОБЛЕМУ:
+tg_bot = TelegramNotifier()
 
 
 async def stop_loss_scanner(bus):
@@ -102,7 +111,7 @@ async def execute_trade(payload):
 
         print(f"📡 [Execution] Отправка ордера на Bybit Testnet: {side} {symbol} объем {qty}...")
 
-        # Отправляем приказ на биржу Bybit
+        # 1. Отправляем приказ на биржу Bybit
         order = session.place_order(
             category="linear",  # Категория линейных бессрочных фьючерсов
             symbol=symbol,
@@ -112,17 +121,76 @@ async def execute_trade(payload):
             timeInForce="GTC"
         )
 
+        # 2. ВОТ СЮДА ВСТАВЛЯЕМ НАШ БЛОК ПРОВЕРКИ И ТЕЛЕГРАМА:
         if order.get('retCode') == 0:
             order_id = order['result']['orderId']
             print(f"✅ [Bybit API] Ордер успешно исполнен биржей! ID: {order_id}")
-            # Синхронизируем с локальной БД, чтобы данные мгновенно отобразились у тебя на сайте
             save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=qty)
+
+            # ОТПРАВКА В ТЕЛЕГРАМ (работает в фоне, не тормозит систему)
+            reason = payload.get('reason', 'Сигнал алгоритма')
+            asyncio.create_task(tg_bot.send_signal(symbol, action, price, reason, tp, sl))
+
         else:
             print(f"❌ [Bybit API] Биржа отклонила ордер: {order.get('retMsg')}")
 
     except Exception as e:
         print(f"❌ [Execution] Критическая ошибка API-модуля: {e}")
 
+
+def save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=0):
+    """Вспомогательная функция: записывает сделки в локальную БД для отображения на сайте"""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Безопасно проверяем колонки
+        try:
+            cursor.execute("ALTER TABLE portfolio ADD COLUMN sl REAL DEFAULT 0")
+        except:
+            pass
+        try:
+            cursor.execute("ALTER TABLE portfolio ADD COLUMN tp REAL DEFAULT 0")
+        except:
+            pass
+
+        cursor.execute("SELECT amount FROM portfolio WHERE symbol = ?", (symbol,))
+        row = cursor.fetchone()
+        current_amount = row[0] if row else 0
+
+        trade_size = 100
+        amount = actual_qty if actual_qty > 0 else (trade_size / price)
+        if "SELL" in action:
+            amount = current_amount
+
+        total_value = amount * price
+
+        if amount > 0:
+            cursor.execute("""
+                INSERT INTO trade_history (timestamp, symbol, action, price, amount, total_value) 
+                VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?)
+            """, (symbol, action, price, amount, total_value))
+
+            if "BUY" in action:
+                new_amount = current_amount + amount
+                cursor.execute("SELECT id FROM portfolio WHERE symbol = ?", (symbol,))
+                if cursor.fetchone():
+                    cursor.execute(
+                        "UPDATE portfolio SET amount = ?, average_entry_price = ?, sl = ?, tp = ? WHERE symbol = ?",
+                        (new_amount, price, sl, tp, symbol))
+                else:
+                    cursor.execute(
+                        "INSERT INTO portfolio (symbol, amount, average_entry_price, sl, tp) VALUES (?, ?, ?, ?, ?)",
+                        (symbol, new_amount, price, sl, tp))
+            elif "SELL" in action:
+                cursor.execute(
+                    "UPDATE portfolio SET amount = 0, average_entry_price = 0, sl = 0, tp = 0 WHERE symbol = ?",
+                    (symbol,))
+
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Ошибка локального сохранения: {e}")
 
 async def run_fastapi():
     config = uvicorn.Config(web_ui.app, host="127.0.0.1", port=8000, log_level="error")
