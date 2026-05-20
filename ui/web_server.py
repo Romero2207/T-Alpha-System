@@ -5,7 +5,7 @@ import sys
 import pandas as pd
 import numpy as np
 import ta
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from pybit.unified_trading import HTTP
 import requests
@@ -114,6 +114,16 @@ async def get_logs():
             except:
                 pass
         return {"status": "ok", "data": logs}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+@app.post("/api/settings")
+async def save_settings(request: Request):
+    """API для сохранения уровня риска с сайта"""
+    try:
+        data = await request.json()
+        with open("settings.json", "w") as f:
+            json.dump(data, f)
+        return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -325,39 +335,48 @@ HTML_CONTENT = """
         </div>
     </div>
 
-    <div id="tab-ai" class="tab-content">
-        <div class="dash-grid">
-            <div class="panel">
+<div class="panel">
                 <div class="panel-title">⚙️ Настройки Риск-Менеджмента</div>
                 <div style="margin-bottom: 20px;">
                     <label style="color:var(--text);">Стратегия Крипторынка:</label><br>
-                    <select style="margin-top:5px;">
-                        <option>Medium Risk (Агрессивно)</option>
-                        <option>Low Risk (Только топ-10 монет)</option>
+                    <select id="setting-crypto" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
+                        <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
+                        <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
                     </select>
                 </div>
                 <div>
                     <label style="color:var(--text);">Стратегия Фондового рынка:</label><br>
-                    <select style="margin-top:5px;">
-                        <option>Low Risk (Без дивидендных гэпов)</option>
-                        <option>Medium Risk (Включая 3-й эшелон)</option>
+                    <select id="setting-moex" style="margin-top:5px; width: 100%; padding: 8px; background: var(--bg); color: #fff; border: 1px solid var(--border-color); border-radius: 4px;">
+                        <option value="low">Low Risk (Безопасно, покупка до RSI 65)</option>
+                        <option value="medium">Medium Risk (Агрессивно, покупка до RSI 75)</option>
                     </select>
                 </div>
                 <button onclick="saveSettings(this)" style="margin-top: 20px; padding: 10px; background:var(--accent); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition: 0.3s;">Сохранить настройки</button>
-
+            </div>
                 <script>
                     // Добавь эту функцию куда-нибудь в блок <script>
                     function saveSettings(btn) {
-                        btn.style.background = '#0ECB81';
-                        btn.style.color = '#fff';
-                        btn.innerText = '✅ Настройки применены';
-                        // Здесь позже добавим отправку данных на Python бэкенд
-                        setTimeout(() => {
-                            btn.style.background = 'var(--accent)';
-                            btn.style.color = '#000';
-                            btn.innerText = 'Сохранить настройки';
-                        }, 2000);
-                    }
+            const cryptoMode = document.getElementById('setting-crypto').value;
+            const moexMode = document.getElementById('setting-moex').value;
+            
+            // Отправляем данные на бэкенд
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({crypto: cryptoMode, moex: moexMode})
+            }).then(res => res.json()).then(data => {
+                if (data.status === 'ok') {
+                    btn.style.background = '#0ECB81';
+                    btn.style.color = '#fff';
+                    btn.innerText = '✅ Настройки применены!';
+                    setTimeout(() => {
+                        btn.style.background = 'var(--accent)';
+                        btn.style.color = '#000';
+                        btn.innerText = 'Сохранить настройки';
+                    }, 2000);
+                }
+            });
+        }
                 </script>
             </div>
 
