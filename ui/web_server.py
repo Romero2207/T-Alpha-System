@@ -696,8 +696,11 @@ HTML_CONTENT = """
         setInterval(loadLogs, 5000);
 
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
+        const ws = new WebSocket("ws://" + window.location.host + "/ws");
         ws.onmessage = function(event) {
             const msg = JSON.parse(event.data);
+            
+            // ЛОВИМ БОЕВЫЕ СИГНАЛЫ (ПОКУПКА/ПРОДАЖА)
             if (msg.event === "TRADE_SIGNAL") {
                 const data = msg.data;
                 const cssClass = data.action.includes('BUY') ? 'buy' : data.action.includes('SELL') ? 'sell' : '';
@@ -723,8 +726,10 @@ HTML_CONTENT = """
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.tp, y1: data.tp, line: {color: '#0ECB81', width: 2, dash: 'dash'} });
                     Plotly.relayout(domElement, { shapes: layout.shapes });
                 }
-                // ЛОВИМ ПРЯМОЙ ЭФИР МЫСЛЕЙ ИИ
-            if (msg.event === "AI_LIVE_THOUGHT") {
+            }
+            
+            // ЛОВИМ ПРЯМОЙ ЭФИР МЫСЛЕЙ ИИ (Теперь он независим!)
+            else if (msg.event === "AI_LIVE_THOUGHT") {
                 const statusBox = document.getElementById('ai-live-status');
                 if (statusBox) {
                     statusBox.innerHTML = `<strong>[${msg.data.symbol}]</strong> ${msg.data.text}`;
@@ -732,7 +737,6 @@ HTML_CONTENT = """
                     statusBox.style.background = 'rgba(243, 186, 47, 0.08)';
                     setTimeout(() => { statusBox.style.background = 'rgba(0,0,0,0.2)'; }, 300);
                 }
-            }
             }
         };
     </script>
@@ -753,8 +757,15 @@ async def websocket_endpoint(websocket: WebSocket):
     async def on_signal(payload):
         await queue.put({"event": "TRADE_SIGNAL", "data": payload})
 
+    # ДОБАВЛЯЕМ ОБРАБОТЧИК МЫСЛЕЙ:
+    async def on_thought(payload):
+        await queue.put({"event": "AI_LIVE_THOUGHT", "data": payload})
+
     system_bus.subscribe("TRADE_SIGNAL", on_signal)
+    system_bus.subscribe("AI_LIVE_THOUGHT", on_thought) # ПОДПИСЫВАЕМСЯ В ШИНЕ
+
     try:
-        while True: await websocket.send_json(await queue.get())
+        while True:
+            await websocket.send_json(await queue.get())
     except WebSocketDisconnect:
         pass
