@@ -187,25 +187,17 @@ async def execute_trade(payload):
         print(f"❌ [Execution] Ошибка API: {e}")
 
 def save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=0):
-    """Вспомогательная функция: записывает сделки в локальную БД для отображения на сайте"""
+    """Молниеносная запись в БД: всё делается за 1 транзакцию"""
     try:
         conn = get_connection()
         cursor = conn.cursor()
 
-        # Безопасно проверяем колонки
-        try:
-            cursor.execute("ALTER TABLE portfolio ADD COLUMN sl REAL DEFAULT 0")
-        except:
-            pass
-        try:
-            cursor.execute("ALTER TABLE portfolio ADD COLUMN tp REAL DEFAULT 0")
-        except:
-            pass
-
+        # 1. Читаем текущий баланс
         cursor.execute("SELECT amount FROM portfolio WHERE symbol = ?", (symbol,))
         row = cursor.fetchone()
-        current_amount = row[0] if row else 0
+        current_amount = row[0] if row else 0.0
 
+        # Рассчитываем объем
         trade_size = 100
         amount = actual_qty if actual_qty > 0 else (trade_size / price)
         if "SELL" in action:
@@ -214,31 +206,36 @@ def save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=0):
         total_value = amount * price
 
         if amount > 0:
+            # 2. Пишем в историю (теперь без конфликтов с id)
             cursor.execute("""
-                INSERT INTO trade_history (timestamp, symbol, action, price, amount, total_value) 
-                VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?)
+                INSERT INTO trade_history (timestamp, symbol, action, price, amount, total_value, reason) 
+                VALUES (datetime('now', 'localtime'), ?, ?, ?, ?, ?, 'AI Signal')
             """, (symbol, action, price, amount, total_value))
 
+            # 3. Обновляем портфель через UPSERT (очень быстрая команда SQLite)
             if "BUY" in action:
                 new_amount = current_amount + amount
-                cursor.execute("SELECT id FROM portfolio WHERE symbol = ?", (symbol,))
-                if cursor.fetchone():
-                    cursor.execute(
-                        "UPDATE portfolio SET amount = ?, average_entry_price = ?, sl = ?, tp = ? WHERE symbol = ?",
-                        (new_amount, price, sl, tp, symbol))
-                else:
-                    cursor.execute(
-                        "INSERT INTO portfolio (symbol, amount, average_entry_price, sl, tp) VALUES (?, ?, ?, ?, ?)",
-                        (symbol, new_amount, price, sl, tp))
+                cursor.execute("""
+                    INSERT INTO portfolio (symbol, amount, average_entry_price, take_profit, stop_loss, high_water_mark)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(symbol) DO UPDATE SET 
+                        amount=excluded.amount, 
+                        average_entry_price=excluded.average_entry_price, 
+                        take_profit=excluded.take_profit, 
+                        stop_loss=excluded.stop_loss,
+                        high_water_mark=excluded.high_water_mark
+                """, (symbol, new_amount, price, tp, sl, price))
             elif "SELL" in action:
-                cursor.execute(
-                    "UPDATE portfolio SET amount = 0, average_entry_price = 0, sl = 0, tp = 0 WHERE symbol = ?",
-                    (symbol,))
+                cursor.execute("""
+                    UPDATE portfolio 
+                    SET amount = 0, average_entry_price = 0, take_profit = 0, stop_loss = 0, high_water_mark = 0 
+                    WHERE symbol = ?
+                """, (symbol,))
 
             conn.commit()
         conn.close()
     except Exception as e:
-        print(f"Ошибка локального сохранения: {e}")
+        print(f"❌ Ошибка записи в БД: {e}")
 
 async def run_fastapi():
     config = uvicorn.Config(web_ui.app, host="127.0.0.1", port=8000, log_level="error")
