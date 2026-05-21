@@ -1,117 +1,102 @@
 import os
 import json
-import sys
-from dotenv import load_dotenv
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.memory import get_vector_db
 from gigachat import GigaChat
 
-load_dotenv()
 
-
-class AIEngine:
+class GigaChatTrader:
     def __init__(self):
-        # ИСПРАВЛЕНИЕ: Теперь берем ключ напрямую из файла .env
         self.credentials = os.getenv("GIGACHAT_CREDENTIALS")
-        self.auth_token = ""
-        self.token_expires = 0
-
-        # Если ключ не найден, выводим предупреждение
         if not self.credentials:
             print("⚠️ [GigaChat] Ключ не найден в .env! ИИ отключен.")
-    def analyze_market_state(self, symbol, current_price, current_volume, indicators):
-        # Базовые индикаторы
-        rsi = indicators.get('rsi', 50.0)
-        macd = indicators.get('macd_hist', 0.0)
-        atr = indicators.get('atr', 0.0)
-        pattern = indicators.get('pattern', 'Нет явного паттерна')
 
-        # Расширенные метрики (Ликвидность и Гэпы)
-        local_high = indicators.get('local_high', current_price * 1.05)
-        local_low = indicators.get('local_low', current_price * 0.95)
-        gap_percent = indicators.get('gap_percent', 0.0)
-        market_type = indicators.get('market_type', 'crypto')
+    def analyze_market_state(self, symbol, current_price, volume, inds, market_type="crypto"):
+        if not self.credentials:
+            return {"action": "HOLD", "confidence": 0, "reason": "Ключ не настроен", "take_profits": [], "sl": 0,
+                    "leverage": 1, "trailing": False}
 
-        # Интеграция новостей и макро-трендов
-        news_sentiment = indicators.get('news_sentiment', 0.0)
-        news_feed = indicators.get('news_feed', 'Без новостей.')
-        sma200 = indicators.get('sma200', 0.0)
-
-        macro_trend = "БЫЧИЙ" if current_price > sma200 and sma200 > 0 else "МЕДВЕЖИЙ"
-
-        current_state = (
-            f"Актив: {symbol} (Рынок: {market_type.upper()}). Цена: {current_price}.\n"
-            f"--- АНАЛИЗ ЛИКВИДНОСТИ: ---\n"
-            f"• Зона сопротивления (Локальный Хай): {local_high}\n"
-            f"• Зона поддержки (Локальный Лой): {local_low}\n"
-            f"• Ценовой разрыв (Gap): {gap_percent}%\n"
-            f"--- ТЕХНИКА И СЕНТИМЕНТ: ---\n"
-            f"• RSI: {rsi} | MACD: {macd} | Паттерн: {pattern}\n"
-            f"• Тренд (SMA200): {macro_trend}\n"
-            f"• Новости ({news_sentiment}): {news_feed}"
-        )
-
+        # --- ЧИТАЕМ ОПЫТ ИЗ БАЗЫ ---
+        bot_experience = "У тебя пока нет опыта торговли этим активом. Будь осторожен."
         try:
-            similar_patterns = self.v_db.query(query_texts=[current_state], n_results=1)
-            memory_context = "Прошлый опыт: " + " | ".join(similar_patterns['documents'][0]) if similar_patterns[
-                                                                                                    'documents'] and \
-                                                                                                similar_patterns[
-                                                                                                    'documents'][
-                                                                                                    0] else "Нет данных."
-        except Exception:
-            memory_context = "Память отключена."
+            if os.path.exists("ai_experience.json"):
+                with open("ai_experience.json", "r") as f:
+                    exp_db = json.load(f)
+                    if symbol in exp_db:
+                        coin_exp = exp_db[symbol]
+                        bot_experience = f"ТВОЙ ПРОШЛЫЙ ОПЫТ НА {symbol}: Winrate {coin_exp['winrate']}%, Профит ${coin_exp['profit']}. Сделок: {coin_exp['trades']}. "
+                        if coin_exp['winrate'] > 60:
+                            bot_experience += "Монета отлично читается алгоритмом, можно торговать агрессивно."
+                        else:
+                            bot_experience += "Монета коварная, ставь короткие стопы и тейки."
+        except:
+            pass
+        # ----------------------------
 
-        prompt = f"""
-        Ты — квантовый алгоритм Smart Money алгосистемы T-Alpha-System.
-        Твоя задача — найти оптимальную точку входа, используя анализ зон ликвидности (Поддержки/Сопротивления) и закрытия Гэпов.
+        rsi = inds.get("rsi", 50)
+        pattern = inds.get("pattern", "None")
+        sma = inds.get("sma", current_price)
+        poc = inds.get("poc", current_price)
 
-        РЫНОЧНАЯ ДАТА:
-        {current_state}
+        trend = "UPTREND (Восходящий)" if current_price > sma else "DOWNTREND (Нисходящий)"
 
-        СТРАТЕГИЯ SMART MONEY:
-        1. Зоны Ликвидности (Поддержка/Сопротивление): Крупный игрок покупает у зоны Поддержки ({local_low}). Если текущая цена близко к Поддержке, и есть паттерн "Бычье поглощение" — это мощный сигнал BUY.
-        2. Закрытие Гэпа (ТОЛЬКО ДЛЯ РЫНКА STOCKS/MOEX): Если рынок фондовый, и есть сильный отрицательный Гэп (например, дивгэп ниже -1.5%), цена с вероятностью 80% стремится закрыть этот гэп вверх. Это дополнительный фактор для BUY от зоны поддержки. Для крипты гэпы игнорируем.
-        3. Размещение стопов: Обязательно прячь Stop Loss за зону Поддержки ({local_low} минус волатильность), а Take Profit ставь перед зоной Сопротивления ({local_high}).
+        # 🧠 ДВА ПОЛУШАРИЯ ИИ
+        if market_type == "crypto":
+            market_rules = """
+РЫНОК: КРИПТОВАЛЮТА (Консервативный режим 1х)
+- Плечо (leverage): Строго 1 (БЕЗ ПЛЕЧА).
+- Вход: Ищи ювелирные точки. RSI < 30 (Лонг на самом дне) или RSI > 70 (Шорт на пике).
+- Выход (Take Profits): Не жадничай. BTC/ETH не ходят по 10% за час. Сформируй сетку из мелких тейков: TP1 (+0.8%), TP2 (+1.5%), TP3 (+2.5%).
+- Защита (Stop Loss): Короткий стоп-лосс на -1.0% от цены входа.
+- Trailing Stop: включен (true).
+"""
+        else:
+            market_rules = """
+РЫНОК: ФОНДОВЫЙ РЫНОК / АКЦИИ РФ (Спокойный, с гэпами)
+- Плечо (leverage): Строго 1 (Без плеча).
+- Вход: RSI < 45, покупка на сильных просадках (Только BUY, без шортов).
+- Выход (Take Profits): Сформируй массив из 2-х цен. TP1 (+0.8%), TP2 (+1.5%).
+- Защита (Stop Loss): БЕЗ СТОП-ЛОССА. Ставь значение 0. Акции мы готовы пересиживать.
+- Trailing Stop: выключен (false).
+"""
 
-        Выдай решение СТРОГО в формате JSON без разметки markdown:
-        {{
-            "action": "BUY" | "SELL" | "HOLD",
-            "confidence": 0-100,
-            "reason": "Краткое обоснование на русском. Обязательно укажи расстояние до Поддержки/Сопротивления и перспективу закрытия Гэпа (если это Фонда)",
-            "take_profit": 0.0,
-            "stop_loss": 0.0
-        }}
-        """
+        system_prompt = f"""Ты — T-Alpha, продвинутый ИИ-алготрейдер. 
+Твоя задача: анализировать индикаторы и выдавать строго JSON с торговым решением. Не пиши текст вне JSON.
+
+{market_rules}
+
+ФОРМАТ ОТВЕТА (Строго JSON):
+{{
+    "action": "BUY", // или SELL (только для крипты), или HOLD
+    "confidence": 85,
+    "reason": "RSI в зоне перепроданности. Ожидаю отскок.",
+    "leverage": 2, 
+    "take_profits": [<цена_tp1>, <цена_tp2>, <цена_tp3>], 
+    "stop_loss": <цена_sl_или_0>,
+    "trailing_stop": true
+}}
+ВНИМАНИЕ: take_profits - это массив чисел (абсолютные цены, а не проценты!).
+"""
+        user_prompt = f"""ДАННЫЕ: Монета/Акция: {symbol} | Цена: {current_price} | Тренд: {trend} | RSI: {rsi} | Паттерн: {pattern} | База POC: {poc}
+ТВОЕ РЕШЕНИЕ (только JSON):"""
 
         try:
             with GigaChat(credentials=self.credentials, verify_ssl_certs=False) as giga:
                 response = giga.chat({
-                    "messages": [
-                        {"role": "system", "content": "Ты - математический алгоритм. Выдавай только JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.1
+                    "messages": [{"role": "system", "content": system_prompt},
+                                 {"role": "user", "content": user_prompt}],
+                    "temperature": 0.1, "max_tokens": 150
                 })
 
                 result_text = response.choices[0].message.content
-                start = result_text.find('{')
-                end = result_text.rfind('}') + 1
-                decision = json.loads(result_text[start:end])
+                start, end = result_text.find('{'), result_text.rfind('}') + 1
+                decision = json.loads(result_text[start:end]) if start != -1 and end != -1 else {"action": "HOLD"}
 
                 print(
-                    f"💭 [GigaChat] Вердикт по {symbol}: {decision.get('action')} | Уверенность: {decision.get('confidence')}%")
+                    f"💭 [GigaChat] {symbol} ({market_type.upper()}): {decision.get('action')} | Плечо: x{decision.get('leverage', 1)} | Уверенность: {decision.get('confidence', 0)}%")
 
-                if "take_profit" not in decision: decision["take_profit"] = 0.0
-                if "stop_loss" not in decision: decision["stop_loss"] = 0.0
+                decision["tp"] = decision.get("take_profits", [])
+                decision["sl"] = decision.get("stop_loss", 0)
+                if decision.get("action") == "HOLD": decision["tp"] = []; decision["sl"] = 0
                 return decision
+
         except Exception as e:
-            return {"action": "HOLD", "confidence": 0, "reason": "Ошибка ИИ", "take_profit": 0.0, "stop_loss": 0.0}
-
-
-if __name__ == "__main__":
-    ai = AIEngine()
-    test_inds = {"rsi": 30.5, "local_high": 310.0, "local_low": 280.0, "gap_percent": -5.5, "market_type": "stocks",
-                 "pattern": "Бычье поглощение"}
-    result = ai.analyze_market_state("SBER", 282.0, 50000, test_inds)
-    print(f"AI Response: {result}")
+            return {"action": "HOLD", "confidence": 0, "reason": str(e), "tp": [], "sl": 0}

@@ -12,7 +12,7 @@ from typing import Dict, Any
 # Подключаем доступ к модулям
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.memory import get_connection
-from ai.gigachat_api import AIEngine
+from ai.gigachat_api import GigaChatTrader
 from engine.risk_manager import RiskManager
 
 
@@ -21,7 +21,7 @@ class BrainNode:
         self.bus = bus
         self.last_analysis_time = {}
         # Инициализируем настоящий ИИ и Риск-менеджера
-        self.ai = AIEngine()
+        self.ai = GigaChatTrader()
         self.risk_manager = RiskManager()
         self.bybit = HTTP(testnet=False)
 
@@ -88,7 +88,7 @@ class BrainNode:
         # Анализируем актив раз в 60 секунд
         if current_time - last_time >= 60:
             self.last_analysis_time[symbol] = current_time
-            print(f"🧠 [Brain] Сбор данных для {symbol}...")
+            #print(f"🧠 [Brain] Сбор данных для {symbol}...")
 
             loop = asyncio.get_running_loop()
 
@@ -98,35 +98,41 @@ class BrainNode:
             inds = await loop.run_in_executor(None, self.get_technical_indicators, symbol, market)
             if not inds: return
 
-            # ЭТАП 2: Запрос к нейросети
+            # ЭТАП 2: Запрос к нейросети (ПЕРЕДАЕМ MARKET)
             await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
-                                                       "text": f"🧠 Отправка параметров (RSI={inds['rsi']}, Паттерн={inds['pattern']}) в GigaChat API..."})
+                                                       "text": f"🧠 Отправка параметров в GigaChat (Режим: {market.upper()})..."})
+
+            # ВАЖНО: Добавили переменную market в конец!
             decision = await loop.run_in_executor(None, self.ai.analyze_market_state, symbol, price, payload['volume'],
-                                                  inds)
+                                                  inds, market)
 
             action = decision.get('action', 'HOLD')
             reason = decision.get('reason', 'Анализ завершен')
             confidence = decision.get('confidence', 0)
+            leverage = decision.get('leverage', 1)
+            tps = decision.get('tp', [])  # Теперь это массив (список)
+            sl = decision.get('sl', 0)
 
             # ЭТАП 3: Проверка лимитов Риск-Менеджера
-            await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
-                                                       "text": f"💭 ИИ вернул вердикт: {action} ({confidence}%). Передаю на аудит Риск-Менеджеру..."})
-            approved, rm_reason, sl, tp = self.risk_manager.approve_signal(symbol, action, price, inds)
+            await self.bus.publish("AI_LIVE_THOUGHT",
+                                   {"symbol": symbol, "text": f"💭 ИИ решил: {action}. Проверка рисков..."})
+            approved, rm_reason, rm_sl, rm_tp = self.risk_manager.approve_signal(symbol, action, price, inds)
 
             if not approved and action != "HOLD":
-                action = f"HOLD (Блок Риск-менеджера: {action})"
+                action = f"HOLD (Блок РМ: {action})"
                 reason = rm_reason
-                await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
-                                                           "text": f"🛡️ Риск-менеджер ЗАБЛОКИРОВАЛ операцию. Причина: {rm_reason}"})
             elif approved and action != "HOLD":
+                # Красиво склеиваем тейки для логов
+                tp_str = " | ".join([str(round(t, 4)) for t in tps]) if tps else "Нет"
                 await self.bus.publish("AI_LIVE_THOUGHT", {"symbol": symbol,
-                                                           "text": f"⚡ Сигнал {action} ОДОБРЕН! Выставляем цели: TP={tp} | SL={sl}. Отправка на биржу Bybit..."})
+                                                           "text": f"⚡ {action} ОДОБРЕН! Плечо: x{leverage}. TP: [{tp_str}]. SL: {sl}."})
 
+            # В сигнал добавляем новые параметры
             signal = {
                 "symbol": symbol, "action": action, "price": price,
-                "confidence": confidence, "reason": reason, "sl": sl, "tp": tp
+                "confidence": confidence, "reason": reason, "sl": sl, "tp": tps,  # tp теперь массив
+                "leverage": leverage, "market": market
             }
-
             # 4. Запись мыслей в базу для сохранения в глобальном журнале
             state_desc = f"[{market.upper()}] Аномалия: {symbol}. Цена: {price}. Паттерн: {inds['pattern']}"
             await loop.run_in_executor(None, self.save_to_db, state_desc, signal)

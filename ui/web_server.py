@@ -51,7 +51,7 @@ def get_portfolio():
         conn = get_connection()
         p_df = pd.read_sql_query("SELECT symbol, amount, average_entry_price FROM portfolio WHERE amount > 0", conn)
         # ИСПРАВЛЕНИЕ: Добавили выборку поля 'amount' (объем сделки) из истории
-        h_df = pd.read_sql_query("SELECT timestamp, symbol, action, price, amount, total_value FROM trade_history ORDER BY id DESC LIMIT 20", conn)
+        h_df = pd.read_sql_query("SELECT timestamp, symbol, action, price, amount, total_value FROM trade_history ORDER BY rowid DESC LIMIT 20", conn)
         conn.close()
 
         fiat = p_df[p_df['symbol'].isin(['USDT', 'RUB'])].to_dict('records')
@@ -92,8 +92,7 @@ def get_logs():
     try:
         conn = get_connection()
         # Берем последние 30 записей логов
-        df = pd.read_sql_query(
-            "SELECT timestamp, market_state, ai_decision FROM experience_replay ORDER BY id DESC LIMIT 30", conn)
+        df = pd.read_sql_query("SELECT timestamp, market_state, ai_decision FROM experience_replay ORDER BY rowid DESC LIMIT 30", conn)
         conn.close()
 
         logs = []
@@ -142,6 +141,24 @@ def save_settings(settings: RiskSettings):
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/ai_experience")
+def get_ai_experience():
+    """Отдает сайту данные из базы опыта ИИ"""
+    import os, json  # Принудительный импорт на случай, если его нет
+    try:
+        if os.path.exists("ai_experience.json"):
+            with open("ai_experience.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not data: return {"status": "error"}
+
+                # Сортируем по профиту и берем топ-8
+                sorted_data = dict(sorted(data.items(), key=lambda item: item[1]['profit'], reverse=True)[:8])
+                return {"status": "ok", "data": sorted_data}
+    except Exception as e:
+        print(f"⚠️ Ошибка чтения опыта ИИ: {e}")
+    return {"status": "error"}
 
 @app.get("/api/history/{symbol}")
 def get_history(symbol: str):
@@ -378,11 +395,21 @@ HTML_CONTENT = """
                     <button onclick="saveSettings(this)" style="margin-top: 20px; padding: 10px; background:var(--accent); color:#000; border:none; border-radius:4px; font-weight:bold; cursor:pointer; transition: 0.3s;">Сохранить настройки</button>
                 </div>
 
-                <div class="panel" style="flex: 1; display: flex; flex-direction: column; min-height: 180px;">
-                    <div class="panel-title" style="color: var(--accent);">📡 Прямой эфир: Что ИИ делает сейчас</div>
-                    <div id="ai-live-status" style="font-family: monospace; font-size: 0.95rem; color: #fff; padding: 15px; background: rgba(0,0,0,0.2); border-radius: 4px; border-left: 4px solid var(--accent); flex: 1; display: flex; align-items: center; justify-content: center; text-align: center; line-height: 1.5; transition: 0.3s;">
-                        🟢 Система активна. Ожидание рыночных тиков...
-                    </div>
+                <div class="panel" style="flex: 1; display: flex; flex-direction: column; min-height: 220px; overflow-y: auto;">
+                    <div class="panel-title" style="color: var(--accent);">🧠 Накопленный Опыт ИИ (Top-8)</div>
+                    <table style="width: 100%; font-size: 0.85rem;">
+                        <thead>
+                            <tr>
+                                <th>Монета</th>
+                                <th>Winrate</th>
+                                <th>Профит</th>
+                                <th>Сделки</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ai-exp-table-body">
+                            <tr><td colspan="4" style="text-align:center; color:var(--text);">Запустите mass_backtest.py...</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
 
@@ -398,51 +425,26 @@ HTML_CONTENT = """
         let currentSymbol = "BTCUSDT"; 
         let favorites = JSON.parse(localStorage.getItem('t_alpha_favs')) || ["BTCUSDT", "SBER"];
 
-        // Умное переключение вкладок с сохранением их внутреннего дизайна
         function openTab(tabId, btn) {
-            document.querySelectorAll('.tab-content').forEach(t => {
-                t.classList.remove('active');
-                t.style.display = 'none';
-            });
+            document.querySelectorAll('.tab-content').forEach(t => { t.classList.remove('active'); t.style.display = 'none'; });
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-
             const activeTab = document.getElementById(tabId);
             activeTab.classList.add('active');
             btn.classList.add('active');
-
-            if (tabId === 'tab-dashboard') {
-                activeTab.style.setProperty('display', 'grid', 'important');
-            } else {
-                activeTab.style.setProperty('display', 'flex', 'important');
-            }
+            if (tabId === 'tab-dashboard') { activeTab.style.setProperty('display', 'grid', 'important'); } 
+            else { activeTab.style.setProperty('display', 'flex', 'important'); }
         }
 
         function saveSettings(btn) {
             const cryptoMode = document.getElementById('setting-crypto').value;
             const moexMode = document.getElementById('setting-moex').value;
-            
-            fetch('/api/settings', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({crypto: cryptoMode, moex: moexMode})
-            }).then(res => res.json()).then(data => {
+            fetch('/api/settings', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({crypto: cryptoMode, moex: moexMode}) })
+            .then(res => res.json()).then(data => {
                 if (data.status === 'ok') {
-                    btn.style.background = '#0ECB81';
-                    btn.style.color = '#fff';
-                    btn.innerText = '✅ Настройки применены!';
-                    setTimeout(() => {
-                        btn.style.background = 'var(--accent)';
-                        btn.style.color = '#000';
-                        btn.innerText = 'Сохранить настройки';
-                    }, 2000);
-                } else {
-                    // Если сервер вернул ошибку, покажем её
-                    alert("Ошибка на сервере: " + (data.message || "Неизвестная ошибка"));
+                    btn.style.background = '#0ECB81'; btn.style.color = '#fff'; btn.innerText = '✅ Настройки применены!';
+                    setTimeout(() => { btn.style.background = 'var(--accent)'; btn.style.color = '#000'; btn.innerText = 'Сохранить настройки'; }, 2000);
                 }
-            }).catch(e => {
-                // Если нет связи с сервером или ошибка в JS
-                alert("Ошибка связи с ядром. Нажми Ctrl + F5, чтобы сбросить кэш браузера!");
-            });
+            }).catch(e => { alert("Ошибка связи с ядром."); });
         }
 
         async function loadSettingsUI() {
@@ -454,16 +456,13 @@ HTML_CONTENT = """
             } catch (e) {}
         }
 
-        // Динамическая загрузка ВСЕГО пула активов с бэкенда
         async function changeMarket(market) {
             currentMarket = market;
             const select = document.getElementById('symbol-select');
-            select.innerHTML = "<option>Синхронизация пула бумаг...</option>";
-
+            select.innerHTML = "<option>Синхронизация пула...</option>";
             try {
                 const response = await fetch(`/api/assets/${market}`);
                 const result = await response.json();
-
                 if (result.status === "ok") {
                     select.innerHTML = "";
                     result.data.forEach(t => {
@@ -472,14 +471,9 @@ HTML_CONTENT = """
                         if(t === currentSymbol) opt.selected = true;
                         select.appendChild(opt);
                     });
-
-                    if (!result.data.includes(currentSymbol)) {
-                        changeSymbol(result.data[0]);
-                    }
+                    if (!result.data.includes(currentSymbol)) changeSymbol(result.data[0]);
                 }
-            } catch (e) {
-                select.innerHTML = "<option>Ошибка загрузки пула</option>";
-            }
+            } catch (e) { select.innerHTML = "<option>Ошибка загрузки</option>"; }
             renderWatchlist();
         }
 
@@ -490,11 +484,7 @@ HTML_CONTENT = """
 
         function toggleFavorite() {
             const index = favorites.indexOf(currentSymbol);
-            if (index === -1) {
-                favorites.push(currentSymbol);
-            } else {
-                favorites.splice(index, 1);
-            }
+            if (index === -1) favorites.push(currentSymbol); else favorites.splice(index, 1);
             localStorage.setItem('t_alpha_favs', JSON.stringify(favorites));
             renderWatchlist();
         }
@@ -504,20 +494,15 @@ HTML_CONTENT = """
             const m_container = document.getElementById('wl-moex');
             const btn = document.getElementById('fav-btn');
             if(!c_container || !btn) return;
-
             btn.style.color = favorites.includes(currentSymbol) ? 'var(--accent)' : 'var(--text)';
-
-            c_container.innerHTML = "";
-            m_container.innerHTML = "";
-
+            c_container.innerHTML = ""; m_container.innerHTML = "";
             favorites.forEach(fav => {
                 const isCrypto = fav.includes("USDT");
                 const div = document.createElement('div');
                 div.innerHTML = fav;
-                div.style.cssText = `padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 4px; cursor: pointer; transition: 0.2s; color: #EAECEF; font-weight: 500;`;
+                div.style.cssText = `padding: 8px 10px; background: rgba(255,255,255,0.03); border-radius: 4px; cursor: pointer; color: #EAECEF; font-weight: 500;`;
                 div.onmouseover = () => div.style.background = 'rgba(255,255,255,0.1)';
                 div.onmouseout = () => div.style.background = 'rgba(255,255,255,0.03)';
-
                 div.onclick = () => {
                     const nextMarket = isCrypto ? 'crypto' : 'moex';
                     document.getElementById('market-select').value = nextMarket;
@@ -526,16 +511,13 @@ HTML_CONTENT = """
                     else { document.getElementById('symbol-select').value = fav; changeSymbol(fav); }
                     toggleWatchlistModal();
                 };
-
-                if (isCrypto) c_container.appendChild(div);
-                else m_container.appendChild(div);
+                if (isCrypto) c_container.appendChild(div); else m_container.appendChild(div);
             });
         }
 
         const domElement = document.getElementById('tvchart');
         const layout = {
-            plot_bgcolor: 'transparent', paper_bgcolor: 'transparent',
-            margin: {t: 10, l: 50, r: 20, b: 40},
+            plot_bgcolor: 'transparent', paper_bgcolor: 'transparent', margin: {t: 10, l: 50, r: 20, b: 40},
             xaxis: { showgrid: false, color: '#848E9C', type: 'category', nticks: 15, tickangle: -45 }, 
             yaxis: { showgrid: true, gridcolor: '#2B3139', color: '#848E9C', fixedrange: false },
             dragmode: 'pan', hovermode: 'x unified', shapes: []
@@ -545,48 +527,26 @@ HTML_CONTENT = """
             document.getElementById('active-symbol').innerText = symbol;
             const response = await fetch(`/api/history/${symbol}?t=${Date.now()}`);
             const result = await response.json();
-
             if (result.status === "ok") {
                 const fiatSign = symbol.includes("USDT") ? "$" : "₽";
                 const currentPrice = result.data.close[result.data.close.length - 1];
 
-                const traceMain = {
-                    x: result.data.time, close: result.data.close, high: result.data.high, low: result.data.low, open: result.data.open,
-                    type: 'candlestick', name: symbol,
-                    increasing: {line: {color: '#0ECB81'}}, decreasing: {line: {color: '#F6465D'}}
-                };
-
-                const traceBBHigh = {
-                    x: result.data.time, y: result.data.bb_high, type: 'scatter', mode: 'lines',
-                    line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, hoverinfo: 'skip', name: 'BB High',
-                    connectgaps: true
-                };
-
-                const traceBBLow = {
-                    x: result.data.time, y: result.data.bb_low, type: 'scatter', mode: 'lines',
-                    line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, fill: 'tonexty', fillcolor: 'rgba(255,255,255,0.03)', hoverinfo: 'skip', name: 'BB Low',
-                    connectgaps: true
-                };
+                const traceMain = { x: result.data.time, close: result.data.close, high: result.data.high, low: result.data.low, open: result.data.open, type: 'candlestick', name: symbol, increasing: {line: {color: '#0ECB81'}}, decreasing: {line: {color: '#F6465D'}} };
+                const traceBBHigh = { x: result.data.time, y: result.data.bb_high, type: 'scatter', mode: 'lines', line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, hoverinfo: 'skip', name: 'BB High', connectgaps: true };
+                const traceBBLow = { x: result.data.time, y: result.data.bb_low, type: 'scatter', mode: 'lines', line: {color: 'rgba(255, 255, 255, 0.2)', width: 1, dash: 'dot'}, fill: 'tonexty', fillcolor: 'rgba(255,255,255,0.03)', hoverinfo: 'skip', name: 'BB Low', connectgaps: true };
 
                 layout.shapes = [];
                 layout.shapes.push({ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: result.data.poc, y1: result.data.poc, line: {color: 'rgba(243, 186, 47, 0.4)', width: 2, dash: 'solid'} });
-                result.data.levels.forEach(lvl => {
-                    layout.shapes.push({ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: lvl.price, y1: lvl.price, line: {color: lvl.type === 'support' ? 'rgba(14, 203, 129, 0.3)' : 'rgba(246, 70, 93, 0.3)', width: 1, dash: 'dot'} });
-                });
-
-                layout.xaxis.autorange = true;
-                layout.yaxis.autorange = true;
+                result.data.levels.forEach(lvl => { layout.shapes.push({ type: 'line', x0: 0, x1: 1, xref: 'paper', y0: lvl.price, y1: lvl.price, line: {color: lvl.type === 'support' ? 'rgba(14, 203, 129, 0.3)' : 'rgba(246, 70, 93, 0.3)', width: 1, dash: 'dot'} }); });
 
                 Plotly.react(domElement, [traceBBHigh, traceBBLow, traceMain], layout, {responsive: true, displayModeBar: true, scrollZoom: true});
 
                 document.getElementById('active-price').innerText = fiatSign + currentPrice.toFixed(2);
                 document.getElementById('conn-status').innerText = '🟢 Ядро подключено (Live)';
-
                 document.getElementById('xray-poc').innerText = fiatSign + result.data.poc.toFixed(2);
                 document.getElementById('xray-rsi').innerText = result.data.rsi;
                 const rsiEl = document.getElementById('xray-rsi-verdict');
                 rsiEl.innerText = result.data.rsi < 35 ? "🟢 ПОКУПКА" : result.data.rsi > 65 ? "🔴 ПЕРЕГРЕВ" : "⚪ НЕЙТРАЛЬНО";
-
                 const trendEl = document.getElementById('xray-sma');
                 trendEl.innerText = currentPrice > result.data.sma ? "📈 UPTREND" : "📉 DOWNTREND";
                 trendEl.style.color = currentPrice > result.data.sma ? "#0ECB81" : "#F6465D";
@@ -598,33 +558,15 @@ HTML_CONTENT = """
                 const res = await fetch('/api/logs');
                 const result = await res.json();
                 if (result.status === "ok") {
-                    let htmlMini = "";
-                    let htmlFull = "";
-
+                    let htmlMini = ""; let htmlFull = "";
                     result.data.forEach(log => {
                         const cssClass = log.action.includes('BUY') ? 'buy' : log.action.includes('SELL') ? 'sell' : '';
                         const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#848E9C';
-
                         const slTpHtml = log.sl > 0 ? `<div style="margin-top:5px; padding: 4px; border-radius: 4px; background: rgba(0,0,0,0.3); font-family: monospace;">🎯 TP: <span style="color:#0ECB81">${log.tp}</span> | 🛑 SL: <span style="color:#F6465D">${log.sl}</span></div>` : '';
 
-                        htmlMini += `<div class="log-card ${cssClass}">
-                            <div style="color:#848E9C;font-size:0.75rem;">${log.time} | ${log.symbol}</div>
-                            <div style="font-weight:bold; color:${color}">${log.action} (${log.conf}%)</div>
-                            ${slTpHtml}
-                            <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">${log.reason}</div>
-                        </div>`;
-
-                        htmlFull += `<div class="log-card ${cssClass}" style="margin-bottom: 12px; padding: 15px;">
-                            <div style="color:#848E9C;font-size:0.85rem;">${log.time} | ${log.symbol}</div>
-                            <div style="font-weight:bold; font-size:1.1rem; margin-bottom: 8px; color:${color}">${log.action} (Уверенность: ${log.conf}%)</div>
-                            ${slTpHtml}
-                            <div style="font-size:0.9rem; color:#EAECEF; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; border-left: 2px solid #555; margin-top: 8px;">
-                                ${log.state}
-                            </div>
-                            <div style="font-size:0.9rem;color:var(--accent);margin-top:8px;">💡 Вывод: ${log.reason}</div>
-                        </div>`;
+                        htmlMini += `<div class="log-card ${cssClass}"><div style="color:#848E9C;font-size:0.75rem;">${log.time} | ${log.symbol}</div><div style="font-weight:bold; color:${color}">${log.action} (${log.conf}%)</div>${slTpHtml}<div style="font-size:0.75rem;color:#aaa;margin-top:4px;">${log.reason}</div></div>`;
+                        htmlFull += `<div class="log-card ${cssClass}" style="margin-bottom: 12px; padding: 15px;"><div style="color:#848E9C;font-size:0.85rem;">${log.time} | ${log.symbol}</div><div style="font-weight:bold; font-size:1.1rem; margin-bottom: 8px; color:${color}">${log.action} (Уверенность: ${log.conf}%)</div>${slTpHtml}<div style="font-size:0.9rem; color:#EAECEF; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 4px; border-left: 2px solid #555; margin-top: 8px;">${log.state}</div><div style="font-size:0.9rem;color:var(--accent);margin-top:8px;">💡 Вывод: ${log.reason}</div></div>`;
                     });
-
                     document.getElementById('ai-logs-mini').innerHTML = htmlMini;
                     document.getElementById('ai-logs-full').innerHTML = htmlFull;
                 }
@@ -639,45 +581,44 @@ HTML_CONTENT = """
                     if(f.symbol === 'USDT') document.getElementById('bal-usdt').innerText = '$' + f.amount.toFixed(2);
                     if(f.symbol === 'RUB') document.getElementById('bal-rub').innerText = f.amount.toFixed(2) + ' ₽';
                 });
-
                 let cAssets = "<tr><th>Токен</th><th>Объем</th><th>Вход</th><th>PnL</th></tr>";
                 let mAssets = "<tr><th>Акция</th><th>Объем</th><th>Вход</th><th>PnL</th></tr>";
-
                 result.assets.forEach(a => { 
                     const pnlColor = a.pnl >= 0 ? '#0ECB81' : '#F6465D';
                     const pnlSign = a.pnl >= 0 ? '+' : '';
                     const pnlText = `<span style="color:${pnlColor}; font-weight:bold;">${pnlSign}${a.pnl} (${pnlSign}${a.pnl_pct}%)</span>`;
-
-                    if(a.symbol.includes('USDT')) {
-                        cAssets += `<tr><td style="color:#F3BA2F;">${a.symbol}</td><td>${a.amount.toFixed(4)}</td><td>$${a.entry.toFixed(2)}</td><td>${pnlText}</td></tr>`;
-                    } else {
-                        mAssets += `<tr><td style="color:#0ECB81;">${a.symbol}</td><td>${a.amount.toFixed(0)}</td><td>${a.entry.toFixed(2)} ₽</td><td>${pnlText}</td></tr>`;
-                    }
+                    if(a.symbol.includes('USDT')) cAssets += `<tr><td style="color:#F3BA2F;">${a.symbol}</td><td>${a.amount.toFixed(4)}</td><td>$${a.entry.toFixed(2)}</td><td>${pnlText}</td></tr>`;
+                    else mAssets += `<tr><td style="color:#0ECB81;">${a.symbol}</td><td>${a.amount.toFixed(0)}</td><td>${a.entry.toFixed(2)} ₽</td><td>${pnlText}</td></tr>`;
                 });
-
-                document.getElementById('crypto-assets').innerHTML = cAssets;
-                document.getElementById('moex-assets').innerHTML = mAssets;
+                document.getElementById('crypto-assets').innerHTML = cAssets; document.getElementById('moex-assets').innerHTML = mAssets;
 
                 let cHist = "<tr><th>Время</th><th>Сигнал</th><th>Цена</th><th>Объем</th><th>Всего</th></tr>";
                 let mHist = "<tr><th>Время</th><th>Сигнал</th><th>Цена</th><th>Объем</th><th>Всего</th></tr>";
-
                 result.history.forEach(h => { 
                     const color = h.action.includes("BUY") ? "var(--green)" : "var(--red)";
                     const fiatSign = h.symbol.includes("USDT") ? "$" : "₽";
-
-                    const row = `<tr>
-                        <td style="color:#848E9C">${h.timestamp.split(' ')[1]}</td>
-                        <td><strong style="color:${color}">${h.action}</strong><br><span style="font-size:0.75rem; color:#848E9C">${h.symbol}</span></td>
-                        <td style="font-family:monospace">${fiatSign}${h.price.toFixed(2)}</td>
-                        <td style="color:#fff; font-family:monospace">${h.amount.toFixed(4)}</td>
-                        <td style="font-weight:bold; font-family:monospace">${fiatSign}${h.total_value.toFixed(2)}</td>
-                    </tr>`;
-
+                    const row = `<tr><td style="color:#848E9C">${h.timestamp.split(' ')[1]}</td><td><strong style="color:${color}">${h.action}</strong><br><span style="font-size:0.75rem; color:#848E9C">${h.symbol}</span></td><td style="font-family:monospace">${fiatSign}${h.price.toFixed(2)}</td><td style="color:#fff; font-family:monospace">${h.amount.toFixed(4)}</td><td style="font-weight:bold; font-family:monospace">${fiatSign}${h.total_value.toFixed(2)}</td></tr>`;
                     if(h.symbol.includes('USDT')) cHist += row; else mHist += row;
                 });
-                document.getElementById('crypto-history').innerHTML = cHist;
-                document.getElementById('moex-history').innerHTML = mHist;
+                document.getElementById('crypto-history').innerHTML = cHist; document.getElementById('moex-history').innerHTML = mHist;
             }
+        }
+
+        async function loadAIExperience() {
+            try {
+                const res = await fetch('/api/ai_experience');
+                const result = await res.json();
+                if (result.status === "ok" && result.data) {
+                    let html = "";
+                    for (const [coin, info] of Object.entries(result.data)) {
+                        const wrColor = info.winrate >= 60 ? '#0ECB81' : '#848E9C';
+                        const profColor = info.profit >= 0 ? '#0ECB81' : '#F6465D';
+                        html += `<tr><td style="font-weight:bold; color:#fff;">${coin}</td><td style="color:${wrColor}">${info.winrate}%</td><td style="color:${profColor}; font-family:monospace;">$${info.profit}</td><td style="color:#848E9C">${info.trades}</td></tr>`;
+                    }
+                    const tbody = document.getElementById('ai-exp-table-body');
+                    if (tbody && html !== "") tbody.innerHTML = html;
+                }
+            } catch (e) {}
         }
 
         window.changeSymbol = function(newSymbol) {
@@ -686,56 +627,24 @@ HTML_CONTENT = """
             loadHistory(currentSymbol);
         };
 
+        // Запуск интервалов
         loadSettingsUI();
-        changeMarket('crypto').then(() => {
-            changeSymbol('BTCUSDT');
-        });
-        loadPortfolio();
-        setInterval(loadPortfolio, 5000);
-        loadLogs();
-        setInterval(loadLogs, 5000);
+        changeMarket('crypto').then(() => { changeSymbol('BTCUSDT'); });
+        loadPortfolio(); setInterval(loadPortfolio, 5000);
+        loadLogs(); setInterval(loadLogs, 5000);
+        loadAIExperience(); setInterval(loadAIExperience, 10000);
 
-        const ws = new WebSocket("ws://" + window.location.host + "/ws");
         const ws = new WebSocket("ws://" + window.location.host + "/ws");
         ws.onmessage = function(event) {
             const msg = JSON.parse(event.data);
-            
-            // ЛОВИМ БОЕВЫЕ СИГНАЛЫ (ПОКУПКА/ПРОДАЖА)
             if (msg.event === "TRADE_SIGNAL") {
+                // Обновление линий на графике для Тейка и Стопа
                 const data = msg.data;
-                const cssClass = data.action.includes('BUY') ? 'buy' : data.action.includes('SELL') ? 'sell' : '';
-                const color = cssClass === 'buy' ? '#0ECB81' : cssClass === 'sell' ? '#F6465D' : '#fff';
-
-                const slTpHtml = data.sl > 0 ? `<div style="margin-top:4px; padding: 4px; background: rgba(0,0,0,0.3); border-radius: 4px; font-family: monospace; font-size: 0.8rem;">🎯 TP: <span style="color:#0ECB81">${data.tp}</span> | 🛑 SL: <span style="color:#F6465D">${data.sl}</span></div>` : '';
-
-                const html = `<div class="log-card ${cssClass}">
-                                  <div style="color:#848E9C;font-size:0.75rem;">${new Date().toLocaleTimeString()} | ${data.symbol}</div>
-                                  <div style="font-weight:bold; color:${color}">${data.action}</div>
-                                  ${slTpHtml}
-                                  <div style="font-size:0.75rem;color:#aaa;margin-top:4px;">Логика: ${data.reason || "AI Signal"}</div>
-                              </div>`;
-
-                const miniBox = document.getElementById('ai-logs-mini');
-                const fullBox = document.getElementById('ai-logs-full');
-                if(miniBox) { miniBox.insertAdjacentHTML('afterbegin', html); if(miniBox.children.length > 10) miniBox.removeChild(miniBox.lastChild); }
-                if(fullBox) { fullBox.insertAdjacentHTML('afterbegin', html); if(fullBox.children.length > 50) fullBox.removeChild(fullBox.lastChild); }
-
                 if (data.sl > 0 && data.symbol === currentSymbol && layout.shapes) {
                     layout.shapes = layout.shapes.filter(s => s.name !== 'sltp');
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.sl, y1: data.sl, line: {color: '#F6465D', width: 2, dash: 'dash'} });
                     layout.shapes.push({ name: 'sltp', type: 'line', x0: 0, x1: 1, xref: 'paper', y0: data.tp, y1: data.tp, line: {color: '#0ECB81', width: 2, dash: 'dash'} });
                     Plotly.relayout(domElement, { shapes: layout.shapes });
-                }
-            }
-            
-            // ЛОВИМ ПРЯМОЙ ЭФИР МЫСЛЕЙ ИИ (Теперь он независим!)
-            else if (msg.event === "AI_LIVE_THOUGHT") {
-                const statusBox = document.getElementById('ai-live-status');
-                if (statusBox) {
-                    statusBox.innerHTML = `<strong>[${msg.data.symbol}]</strong> ${msg.data.text}`;
-                    // Визуальный эффект мягкой вспышки при обновлении мысли
-                    statusBox.style.background = 'rgba(243, 186, 47, 0.08)';
-                    setTimeout(() => { statusBox.style.background = 'rgba(0,0,0,0.2)'; }, 300);
                 }
             }
         };

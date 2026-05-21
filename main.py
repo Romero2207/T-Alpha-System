@@ -76,67 +76,115 @@ async def stop_loss_scanner(bus):
 
 
 async def execute_trade(payload):
-    """Модуль исполнения: отправляет реальные ордера на Bybit Testnet из файла .env"""
+    """Модуль исполнения: Плечо, Сетка Take-Profit'ов и Trailing"""
     symbol = payload['symbol']
     action = payload['action']
     price = payload['price']
     sl = payload.get('sl', 0)
-    tp = payload.get('tp', 0)
+    tps = payload.get('tp', [])  # Массив Тейк-Профитов
+    leverage = payload.get('leverage', 1)
+    market = payload.get('market', 'crypto')
 
-    # Мы торгуем фьючерсы крипты к USDT
-    if "USDT" not in symbol:
+    if market != "crypto":
+        # Для MOEX пока симулируем сделку в БД, т.к. Тинькофф API мы еще не подключили
+        save_order_to_local_db(symbol, action, price, sl, tps[0] if tps else 0)
         return
 
     try:
-        # Читаем ключи напрямую из системного окружения (.env)
         api_key = os.getenv("BYBIT_TESTNET_API_KEY")
         api_secret = os.getenv("BYBIT_TESTNET_API_SECRET")
-
-        # Если ключи в .env не найдены, бот безопасно перейдет в режим симуляции в локальную БД
-        if not api_key or not api_secret:
-            print("⚠️ [Execution] Ордер симулирован: не найдены API-ключи в файле .env")
-            save_order_to_local_db(symbol, action, price, sl, tp)
-            return
+        if not api_key: return
 
         from pybit.unified_trading import HTTP
-        session = HTTP(
-            testnet=True,  # Включаем режим Песочницы (Bybit Testnet)
-            api_key=api_key,
-            api_secret=api_secret
-        )
+        session = HTTP(testnet=True, api_key=api_key, api_secret=api_secret)
 
-        # Рассчитываем объем сделки: заходим на фиксированные виртуальные 100 USDT
-        qty = round(100 / price, 3)
+        # 1. Устанавливаем Плечо (Леверидж) для монеты
+        try:
+            session.set_leverage(category="linear", symbol=symbol, buyLeverage=str(leverage),
+                                 sellLeverage=str(leverage))
+            print(f"⚙️ [Bybit] Плечо для {symbol} успешно установлено на x{leverage}")
+        except Exception as e:
+            pass  # Если плечо уже установлено, биржа выдаст ошибку, мы её просто игнорируем
+
+        # 2. Рассчитываем объем. Допустим, маржа $100 * плечо
+        margin = 100
+        total_qty = round((margin * leverage) / price, 3)
         side = "Buy" if "BUY" in action else "Sell"
 
-        print(f"📡 [Execution] Отправка ордера на Bybit Testnet: {side} {symbol} объем {qty}...")
+        print(f"📡 [Execution] {side} {symbol} объем {total_qty} (Плечо x{leverage})...")
 
-        # 1. Отправляем приказ на биржу Bybit
-        order = session.place_order(
-            category="linear",  # Категория линейных бессрочных фьючерсов
-            symbol=symbol,
-            side=side,
-            orderType="Market",  # Покупаем/Продаем мгновенно по текущей рыночной цене
-            qty=str(qty),
-            timeInForce="GTC"
-        )
+        # 3. Основной рыночный ордер с привязанным Stop-Loss
+        order_params = {
+            "category": "linear", "symbol": symbol, "side": side,
+            "orderType": "Market", "qty": str(total_qty), "timeInForce": "GTC"
+        }
+        if sl > 0:
+            order_params["stopLoss"] = str(round(sl, 4))
 
-        # 2. ВОТ СЮДА ВСТАВЛЯЕМ НАШ БЛОК ПРОВЕРКИ И ТЕЛЕГРАМА:
-        if order.get('retCode') == 0:
-            order_id = order['result']['orderId']
-            print(f"✅ [Bybit API] Ордер успешно исполнен биржей! ID: {order_id}")
-            save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=qty)
+            # === НАЧАЛО ИЗМЕНЕННОГО БЛОКА ===
+            try:
+                order = session.place_order(**order_params)
+            except Exception as api_err:
+                # Если биржа выдала критическую ошибку (например, блокировка IP)
+                order = {'retCode': 10024, 'retMsg': str(api_err)}
 
-            # ОТПРАВКА В ТЕЛЕГРАМ (работает в фоне, не тормозит систему)
-            reason = payload.get('reason', 'Сигнал алгоритма')
-            asyncio.create_task(tg_bot.send_signal(symbol, action, price, reason, tp, sl))
+            if order.get('retCode') == 0:
+                print(f"✅ [Bybit] Базовая позиция открыта!")
 
-        else:
-            print(f"❌ [Bybit API] Биржа отклонила ордер: {order.get('retMsg')}")
+                # --- ФИЗИЧЕСКИЙ ТРЕЙЛИНГ-СТОП ---
+                is_trailing = payload.get('trailing_stop', False)
+                if is_trailing and market == "crypto":
+                    try:
+                        # Рассчитываем дистанцию трейлинга (например, 1.5% от текущей цены)
+                        trail_dist = str(round(price * 0.015, 4))
+                        session.set_trading_stop(
+                            category="linear", symbol=symbol,
+                            trailingStop=trail_dist
+                        )
+                        print(f"🎣 [Bybit] Trailing-Stop активирован! Шаг преследования: {trail_dist} USDT")
+                    except Exception as e:
+                        print(f"⚠️ Ошибка активации Трейлинга: {e}")
+                # --------------------------------------------
+
+                # 4. Выставляем СЕТКУ Тейк-Профитов (Лимитные ордера на закрытие)
+                if tps:
+                    # Делим общий объем позиции на количество тейков
+                    qty_per_tp = round(total_qty / len(tps), 3)
+                    tp_side = "Sell" if side == "Buy" else "Buy"
+
+                    for i, tp_price in enumerate(tps):
+                        try:
+                            session.place_order(
+                                category="linear", symbol=symbol, side=tp_side,
+                                orderType="Limit", qty=str(qty_per_tp), price=str(round(tp_price, 4)),
+                                reduceOnly=True
+                            )
+                            print(f"🎯 [Bybit] Размещен Take-Profit #{i + 1} на цене {tp_price}")
+                        except Exception as e:
+                            print(f"⚠️ Ошибка установки TP {tp_price}: {e}")
+
+                # Сохраняем в БД и кидаем в Телеграм реальную сделку
+                save_order_to_local_db(symbol, action, price, sl, tps[-1] if tps else 0, actual_qty=total_qty)
+                reason = payload.get('reason', 'AI Signal')
+                tp_for_tg = tps[0] if tps else 0
+                asyncio.create_task(tg_bot.send_signal(symbol, f"{action} (x{leverage})", price, reason, tp_for_tg, sl))
+
+            else:
+                # === ВОТ ОН, РЕЖИМ СИМУЛЯЦИИ (PAPER TRADING) ===
+                print(f"⚠️ [Bybit API] Отказ: {order.get('retMsg')}")
+                print(f"🔄 [Система] Перевожу сигнал {symbol} в режим симуляции (Paper Trading)...")
+
+                # Сохраняем виртуальную сделку в нашу БД (появится на сайте)
+                save_order_to_local_db(symbol, f"{action} (SIM)", price, sl, tps[0] if tps else 0, actual_qty=total_qty)
+
+                # Отправляем уведомление в Телеграм с пометкой (SIM)
+                reason = payload.get('reason', 'Симуляция из-за блока API')
+                tp_for_tg = tps[0] if tps else 0
+                asyncio.create_task(tg_bot.send_signal(symbol, f"{action} (SIM)", price, reason, tp_for_tg, sl))
+            # === КОНЕЦ ИЗМЕНЕННОГО БЛОКА ===
 
     except Exception as e:
-        print(f"❌ [Execution] Критическая ошибка API-модуля: {e}")
-
+        print(f"❌ [Execution] Ошибка API: {e}")
 
 def save_order_to_local_db(symbol, action, price, sl, tp, actual_qty=0):
     """Вспомогательная функция: записывает сделки в локальную БД для отображения на сайте"""

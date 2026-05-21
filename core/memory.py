@@ -6,10 +6,31 @@ CHROMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "chroma_d
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+    # Подключаемся (если файла нет, он создастся сам)
+    conn = sqlite3.connect("trading_bot.db", timeout=30, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL;")  # Турбо-режим
 
+    # БРОНЕБОЙНАЯ ЗАЩИТА: Автоматически создаем все таблицы, если их кто-то удалил
+    conn.execute('''CREATE TABLE IF NOT EXISTS portfolio (
+                        symbol TEXT UNIQUE, 
+                        amount REAL, 
+                        average_entry_price REAL)''')
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS trade_history (
+                        timestamp TEXT, 
+                        symbol TEXT, 
+                        action TEXT, 
+                        price REAL, 
+                        amount REAL, 
+                        total_value REAL)''')
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS experience_replay (
+                        timestamp TEXT, 
+                        market_state TEXT, 
+                        ai_decision TEXT)''')
+    conn.commit()
+
+    return conn
 
 def init_db():
     conn = get_connection()
