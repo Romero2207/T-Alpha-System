@@ -28,6 +28,10 @@ def get_connection():
                         timestamp TEXT, 
                         market_state TEXT, 
                         ai_decision TEXT)''')
+    try:
+        conn.execute("ALTER TABLE trade_history ADD COLUMN reason TEXT DEFAULT 'AI Signal'")
+    except:
+        pass  # Если колонка уже есть, он просто промолчит
     conn.commit()
 
     return conn
